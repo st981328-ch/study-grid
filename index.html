@@ -810,17 +810,17 @@ async function setupSync(pat) {
     await ghUser();
     const { id, created } = await findOrCreateGist();
     localStorage.setItem("sync_gist_id", id);
-    if (created) {
-      await syncPush({ force: true });         // fresh gist mirrors this device — just anchor the base
-    } else {
+    // First enable on a device: if the cloud already has data, it WINS — pull it here (never overwrite
+    // the cloud with an empty/new device). Only seed the cloud from this device when the gist is brand
+    // new or empty. No native confirm() — it's unreliable in embedded webviews, and this default is safe.
+    if (!created) {
       const remote = await fetchRemote();
-      const remoteEmpty = !remote || !remote._exportedAt;
-      if (!remoteEmpty && confirm("雲端已有資料。\n\n「確定」= 用雲端覆蓋這台裝置\n「取消」= 用這台裝置覆蓋雲端")) {
-        await syncPull({ silent: true });        // reloads with cloud data
+      if (remote && remote._exportedAt) {
+        await syncPull({ silent: true });        // reloads with the cloud data
         return true;
       }
-      await syncPush({ force: true });
     }
+    await syncPush({ force: true });
     sgToast("雲端同步已啟用");
     return true;
   } catch (e) {
@@ -2675,6 +2675,8 @@ function CloudSyncCell({ notify }) {
   const [on, setOn] = useState(syncOn());
   const [busy, setBusy] = useState(false);
   const [last, setLast] = useState(localStorage.getItem("last_sync_time") || "");
+  const [patOpen, setPatOpen] = useState(false);
+  const [patDraft, setPatDraft] = useState("");
   const fileRef = useRef(null);
   const refresh = () => { setOn(syncOn()); setLast(localStorage.getItem("last_sync_time") || ""); };
 
@@ -2691,12 +2693,16 @@ function CloudSyncCell({ notify }) {
     catch (err) { setBusy(false); notify && notify(String(err.message || err)); }
   };
 
-  const enable = async () => {
-    const pat = window.prompt("貼上 GitHub Personal Access Token(需勾選 gist 權限):\n\nToken 只存在這台裝置的瀏覽器,不會寫入程式碼或上傳。");
-    if (!pat || !pat.trim()) return;
+  // Inline token input (NOT window.prompt — prompt() is unsupported in Electron/Obsidian's webview and
+  // silently no-ops, so the button appeared to "do nothing"). This works everywhere.
+  const submitPat = async () => {
+    const pat = patDraft.trim();
+    if (!pat) return;
     setBusy(true);
-    await setupSync(pat);
-    setBusy(false); refresh();
+    const ok = await setupSync(pat);
+    setBusy(false);
+    if (ok) { setPatDraft(""); setPatOpen(false); }
+    refresh();
   };
   const push = async () => { setBusy(true); await syncPush({}); setBusy(false); refresh(); };
   const pull = async () => { setBusy(true); await syncPull({}); setBusy(false); refresh(); };
@@ -2715,9 +2721,26 @@ function CloudSyncCell({ notify }) {
           <div className="fb text-xs mb-3" style={{ color: "#666", lineHeight: 1.7 }}>
             在每台裝置(手機／電腦)貼上同一組 GitHub token,單字與 webinar 紀錄就會透過你帳號下的<b>私密 Gist</b> 自動雙向同步,只有你看得到。token 只存這台裝置,不會進入公開程式碼。
           </div>
-          <button onClick={enable} disabled={busy} className="btn-ink px-5 py-3 text-sm disabled:opacity-40">
-            <Ico name="spark" size={13} /> {busy ? "設定中…" : "啟用雲端同步"}
-          </button>
+          {!patOpen ? (
+            <button onClick={() => setPatOpen(true)} disabled={busy} className="btn-ink px-5 py-3 text-sm disabled:opacity-40">
+              <Ico name="spark" size={13} /> 啟用雲端同步
+            </button>
+          ) : (
+            <div className="flex flex-col gap-2">
+              <input type="password" value={patDraft} onChange={(e) => setPatDraft(e.target.value)}
+                onKeyDown={(e) => { if (e.key === "Enter") submitPat(); }}
+                placeholder="貼上 GitHub token(gist 權限)" autoFocus
+                autoCapitalize="none" autoCorrect="off" spellCheck={false}
+                className="fb px-3 py-2.5 text-sm w-full" style={{ border: `1px solid ${INK}`, background: "transparent", letterSpacing: "0.02em" }} />
+              <div className="flex gap-2">
+                <button onClick={submitPat} disabled={busy || !patDraft.trim()} className="btn-ink px-4 py-2.5 text-sm disabled:opacity-40">
+                  {busy ? "設定中…" : "確認啟用"}
+                </button>
+                <button onClick={() => { setPatOpen(false); setPatDraft(""); }} disabled={busy} className="btn-ghost px-4 py-2.5 text-sm">取消</button>
+              </div>
+              <div className="fb text-xs" style={{ color: "#999", lineHeight: 1.6 }}>token 只存這台裝置,不會進入公開程式碼。</div>
+            </div>
+          )}
         </>
       ) : (
         <>
