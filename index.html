@@ -833,6 +833,17 @@ function disableSync() {
   localStorage.removeItem("sync_base");
 }
 
+// Restore a JSON backup, then — if sync is on — force-push it to the cloud BEFORE the reload, so
+// migrating old data actually reaches the Gist. Without this, importBackup's debounced auto-push is
+// cancelled by the reload and the post-reload boot pull can overwrite the just-restored data with the
+// older/empty cloud copy. Shared by the Word Bank importer and the Settings sync panel.
+async function restoreBackupFile(file, notify) {
+  await importBackup(file);
+  if (syncOn()) await syncPush({ force: true });
+  if (notify) notify(syncOn() ? "已還原並上傳雲端,重新載入…" : "已還原,重新載入…");
+  setTimeout(() => window.location.reload(), 700);
+}
+
 // The webinar skill patches a <script id="study-grid-seed"> JSON block
 // in this file after every session. On boot we fold that into localStorage: new wordbank
 // ids get added (never overwritten, so manual edits/progress survive), webinarEntries with
@@ -1652,11 +1663,12 @@ function BankTab({ words, pW, notify }) {
     const file = e.target.files && e.target.files[0];
     e.target.value = ""; // allow re-importing the same file name
     if (!file) return;
-    if (!window.confirm("匯入會覆蓋這台裝置目前的單字庫、測驗紀錄與進度,確定?")) return;
+    const msg = syncOn()
+      ? "匯入會覆蓋這台裝置目前的單字庫、測驗紀錄與進度,並上傳到雲端(其他裝置下次會拉到這份)。確定?"
+      : "匯入會覆蓋這台裝置目前的單字庫、測驗紀錄與進度,確定?";
+    if (!window.confirm(msg)) return;
     try {
-      await importBackup(file);
-      notify("已匯入,重新載入…");
-      setTimeout(() => window.location.reload(), 600);
+      await restoreBackupFile(file, notify);
     } catch (err) {
       notify(String(err.message || err));
     }
@@ -2635,7 +2647,21 @@ function CloudSyncCell({ notify }) {
   const [on, setOn] = useState(syncOn());
   const [busy, setBusy] = useState(false);
   const [last, setLast] = useState(localStorage.getItem("last_sync_time") || "");
+  const fileRef = useRef(null);
   const refresh = () => { setOn(syncOn()); setLast(localStorage.getItem("last_sync_time") || ""); };
+
+  const onRestore = async (e) => {
+    const file = e.target.files && e.target.files[0];
+    e.target.value = "";
+    if (!file) return;
+    const msg = syncOn()
+      ? "從備份 JSON 還原,會覆蓋這台裝置目前的資料並上傳到雲端(其他裝置下次會拉到這份)。確定?"
+      : "從備份 JSON 還原,會覆蓋這台裝置目前的資料。確定?";
+    if (!window.confirm(msg)) return;
+    setBusy(true);
+    try { await restoreBackupFile(file, notify); }
+    catch (err) { setBusy(false); notify && notify(String(err.message || err)); }
+  };
 
   const enable = async () => {
     const pat = window.prompt("貼上 GitHub Personal Access Token(需勾選 gist 權限):\n\nToken 只存在這台裝置的瀏覽器,不會寫入程式碼或上傳。");
@@ -2678,6 +2704,18 @@ function CloudSyncCell({ notify }) {
           <button onClick={off} className="btn-ghost px-3 py-2 text-xs mt-2" style={{ color: "#999" }}>停用同步</button>
         </>
       )}
+      {/* Migrate old data: restore a JSON backup here. When sync is on it force-pushes to the cloud so
+          the restored data actually lands in the Gist (and other devices pull it). */}
+      <div className="hair-t mt-3" style={{ paddingTop: 12 }}>
+        <button onClick={() => fileRef.current && fileRef.current.click()} disabled={busy}
+          className="btn-ghost px-4 py-2.5 text-sm w-full disabled:opacity-40">
+          <Ico name="up" size={12} /> 從備份還原 JSON{on ? "(並上傳雲端)" : ""}
+        </button>
+        <input ref={fileRef} type="file" accept="application/json,.json" onChange={onRestore} style={{ display: "none" }} />
+        <div className="fb text-xs mt-2" style={{ color: "#999", lineHeight: 1.6 }}>
+          把舊裝置匯出的備份 JSON 還原到這裡,即可把舊資料搬上雲端。
+        </div>
+      </div>
     </Cell>
   );
 }
