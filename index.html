@@ -2613,12 +2613,15 @@ function ProgressTab({ words, history, errorBank }) {
 
       {/* Activity heatmap */}
       <Cell tag="打卡 12 週" count={`${activeDays} 天`} className={narrow ? "hair-b" : "hair-r hair-b"}>
-        <div style={{ display: "grid", gridTemplateRows: "repeat(7, 1fr)", gridAutoFlow: "column", gap: 3, overflowX: "auto" }}>
+        {/* Fixed-size row/column tracks (13px) + tight 3px gap = GitHub-style. Rows must be a fixed
+            size, not 1fr — 1fr stretches the squares apart when the card grows to match its neighbour. */}
+        <div style={{ display: "grid", gridTemplateRows: "repeat(7, 13px)", gridAutoFlow: "column",
+          gridAutoColumns: "13px", gap: 3, justifyContent: "start", overflowX: "auto" }}>
           {heat.map((d) => {
             const lv = heatLevel(d.total);
             return (
               <div key={d.date} title={`${fmtDate(d.date)} · ${d.total} 題`}
-                style={{ width: 14, height: 14, borderRadius: 2,
+                style={{ width: 13, height: 13, borderRadius: 2,
                   background: lv === 0 ? "#e2e2dc" : "var(--accent)",
                   opacity: lv === 0 ? 1 : lv === 1 ? 0.4 : lv === 2 ? 0.7 : 1 }} />
             );
