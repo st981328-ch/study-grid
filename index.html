@@ -377,6 +377,36 @@ function normHex(hex) {
   return m ? "#" + m[1].toUpperCase() : DEFAULT_ACCENT;
 }
 
+// Clipboard write that survives Electron/Obsidian webviews, iframes, file://, and unfocused docs.
+// navigator.clipboard is undefined (or rejects with no permission) in those contexts, and since the
+// old call sites had no .catch this failed SILENTLY — the button did nothing (same class of bug as
+// window.prompt inside Electron, see the sync-enable fix). Falls back to a hidden-textarea
+// execCommand("copy"). Returns Promise<boolean> so callers can confirm or offer manual copy.
+function copyText(text) {
+  const legacy = () => {
+    try {
+      const ta = document.createElement("textarea");
+      ta.value = text;
+      ta.setAttribute("readonly", "");
+      ta.style.cssText = "position:fixed;top:-9999px;left:-9999px;opacity:0;";
+      document.body.appendChild(ta);
+      ta.focus();
+      ta.select();
+      const ok = document.execCommand("copy");
+      document.body.removeChild(ta);
+      return ok;
+    } catch (e) {
+      return false;
+    }
+  };
+  try {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      return navigator.clipboard.writeText(text).then(() => true, () => legacy());
+    }
+  } catch (e) { /* fall through to legacy */ }
+  return Promise.resolve(legacy());
+}
+
 const CSS = (
   <style>{`
     :root { --accent: ${DEFAULT_ACCENT}; --accent-text: ${INK}; }
@@ -1986,6 +2016,9 @@ function WebinarArchiveChecklist({ onDone, latest, words, pW, notify }) {
   const [addedVocab, setAddedVocab] = useState([]);
   const [phase, setPhase] = useState("checklist"); // "checklist" | "done"
   const [copied, setCopied] = useState(false);
+  // Filled with the handoff text only if every clipboard path fails, so the user can still select
+  // and copy it by hand instead of being left with a button that silently did nothing.
+  const [manualCopy, setManualCopy] = useState("");
   // Self-rate last session's 3 priorities so the /webinar analysis can close the loop instead of
   // guessing whether they were hit. Keyed by priority index → "done" | "partial" | "missed".
   const [ratings, setRatings] = useState({});
@@ -2033,9 +2066,15 @@ function WebinarArchiveChecklist({ onDone, latest, words, pW, notify }) {
       if (hasNotes) payload.liveNotes = liveNotes.trim();
       out += "\n\n" + JSON.stringify(payload, null, 2);
     }
-    navigator.clipboard.writeText(out).then(() => {
-      setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
+    copyText(out).then((ok) => {
+      if (ok) {
+        setManualCopy("");
+        setCopied(true);
+        setTimeout(() => setCopied(false), 2000);
+      } else {
+        setManualCopy(out);
+        notify("無法自動複製,請從下方框手動複製");
+      }
     });
   }
 
@@ -2104,6 +2143,13 @@ function WebinarArchiveChecklist({ onDone, latest, words, pW, notify }) {
               </button>
               <button onClick={onDone} className="btn-ink px-5 py-3 text-sm">Close 關閉</button>
             </div>
+            {manualCopy && (
+              <div style={{ marginBottom: 16 }}>
+                <div className="fb text-xs" style={{ color: RED, marginBottom: 4 }}>自動複製被擋住了,請全選下框內容手動複製:</div>
+                <textarea readOnly value={manualCopy} onFocus={(e) => e.target.select()} rows={5}
+                  className="w-full px-3 py-2 text-sm" style={{ border: `1px solid ${INK}`, background: "transparent" }} />
+              </div>
+            )}
             <button onClick={() => setPhase("checklist")} className="fb text-xs underline" style={{ color: "#888" }}>
               ← 上一步
             </button>
@@ -3180,6 +3226,8 @@ function PresentMode({ entry, onClose, kind }) {
 // clipboard export, reskinned into the paper/hairline/pill visual language.
 function PracticeMode({ entry, onClose, notify }) {
   const [allState, setAllState] = useState(null);
+  // Manual-copy fallback text, shown only when every clipboard path fails (Electron/webview).
+  const [manualExport, setManualExport] = useState("");
 
   useEffect(() => {
     (async () => setAllState(await loadKey("webinarQuizState", {})))();
@@ -3225,7 +3273,10 @@ function PracticeMode({ entry, onClose, notify }) {
       const sel = myState["m" + i];
       out += `${quiz.correction.length + i + 1}. ${q.prompt}\n   我選:${sel != null ? q.options[sel] : "(未作答)"}\n`;
     });
-    navigator.clipboard.writeText(out).then(() => notify("已複製到剪貼簿"));
+    copyText(out).then((ok) => {
+      if (ok) { setManualExport(""); notify("已複製到剪貼簿"); }
+      else { setManualExport(out); notify("無法自動複製,請從下方框手動複製"); }
+    });
   }
 
   const total = quiz.correction.length + quiz.choice.length;
@@ -3361,6 +3412,13 @@ function PracticeMode({ entry, onClose, notify }) {
           <button onClick={checkAll} className="btn-ink px-5 py-2.5 text-sm">全部對答案</button>
           <button onClick={exportResults} className="btn-ghost px-5 py-2.5 text-sm"><Ico name="clip" size={13} /> 複製作答結果</button>
           <span className="fb text-xs" style={{ color: "#777" }}>貼給 Claude 可以得到逐題講解</span>
+        </div>
+      )}
+      {manualExport && (
+        <div className="hair-t px-5 py-3">
+          <div className="fb text-xs" style={{ color: RED, marginBottom: 4 }}>自動複製被擋住了,請全選下框內容手動複製:</div>
+          <textarea readOnly value={manualExport} onFocus={(e) => e.target.select()} rows={5}
+            className="w-full px-3 py-2 text-sm" style={{ border: `1px solid ${INK}`, background: "transparent" }} />
         </div>
       )}
     </div>
