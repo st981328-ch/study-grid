@@ -1089,7 +1089,7 @@ function App() {
     return <>{CSS}<WebinarLiveMode latest={webinar[0]} onEnd={() => setSessionMode("archive")} /></>;
   }
   if (sessionMode === "archive") {
-    return <>{CSS}<WebinarArchiveChecklist onDone={() => setSessionMode(null)} latest={webinar[0]} words={words} pW={pW} notify={notify} /></>;
+    return <>{CSS}<WebinarArchiveChecklist onDone={() => setSessionMode(null)} latest={webinar[0]} notify={notify} /></>;
   }
 
   return (
@@ -2005,15 +2005,10 @@ function WebinarLiveMode({ latest, onEnd }) {
 
 // Post-webinar archive checklist -> hands off to the /webinar skill. Only the recording file is
 // actually required (see SKILL.md) so this stays a single real check, not invented busywork.
-// Vocab pasted here (same tab/comma-separated format as a Notion export) gets added to the Word
-// Bank immediately via vocabId() ids, AND can be copied as a payload snippet so /webinar folds it
-// into study-grid.html's seed block too — otherwise it'd only ever live in this browser's
-// localStorage, not the file itself (see feedback_fixed_vs_normal_flow_embedded for why that
-// distinction matters for this app).
-function WebinarArchiveChecklist({ onDone, latest, words, pW, notify }) {
+// Vocab is no longer entered here: the user records it in the live-session notes, which ride along
+// in the handoff JSON's liveNotes, and /webinar decides what to add to the Word Bank from there.
+function WebinarArchiveChecklist({ onDone, latest, notify }) {
   const [fileConfirmed, setFileConfirmed] = useState(false);
-  const [vocabText, setVocabText] = useState("");
-  const [addedVocab, setAddedVocab] = useState([]);
   const [phase, setPhase] = useState("checklist"); // "checklist" | "done"
   const [copied, setCopied] = useState(false);
   // Filled with the handoff text only if every clipboard path fails, so the user can still select
@@ -2030,28 +2025,10 @@ function WebinarArchiveChecklist({ onDone, latest, words, pW, notify }) {
   const lastPriorities = (latest && latest.priorities) || [];
   const ratedCount = Object.keys(ratings).length;
   const hasNotes = liveNotes.trim().length > 0;
-  const hasFeedback = addedVocab.length > 0 || ratedCount > 0 || hasNotes;
+  const hasFeedback = ratedCount > 0 || hasNotes;
   const RATE_OPTS = [["done", "達成"], ["partial", "部分"], ["missed", "沒顧到"]];
 
-  function parseVocab() {
-    return vocabText.split("\n").map((l) => l.trim()).filter(Boolean).map((line) => {
-      const p = line.split(/[\t,，]/).map((x) => x.trim());
-      return { word: p[0] || "", meaning: p[1] || "" };
-    }).filter((v) => v.word && v.meaning);
-  }
-
   function proceed() {
-    const parsed = parseVocab();
-    if (parsed.length) {
-      const existingIds = new Set(words.map((w) => w.id));
-      const toAdd = parsed.filter((v) => !existingIds.has(vocabId(v.word)));
-      if (toAdd.length) {
-        pW([...toAdd.map((v) => ({ id: vocabId(v.word), word: v.word, meaning: v.meaning, example: "", correct: 0, wrong: 0, addedAt: todayISO() })), ...words]);
-        clearTombstones(toAdd.map((v) => vocabId(v.word)));
-        notify(`已加入 ${toAdd.length} 個新單字`);
-      }
-      setAddedVocab(parsed);
-    }
     setPhase("done");
   }
 
@@ -2061,7 +2038,6 @@ function WebinarArchiveChecklist({ onDone, latest, words, pW, notify }) {
     let out = "/webinar";
     if (hasFeedback) {
       const payload = {};
-      if (addedVocab.length) payload.vocab = addedVocab;
       if (ratedCount) payload.priorityReview = lastPriorities.map((p, i) => ({ title: parsePriority(p).title, rating: ratings[i] || "unrated" }));
       if (hasNotes) payload.liveNotes = liveNotes.trim();
       out += "\n\n" + JSON.stringify(payload, null, 2);
@@ -2113,8 +2089,6 @@ function WebinarArchiveChecklist({ onDone, latest, words, pW, notify }) {
                 </div>
               </div>
             )}
-            <TA label="生字貼上(選填,單字 Tab/逗號 意思,一行一個)" v={vocabText} set={setVocabText}
-              ph={"incognito\t匿名\nsympathetic system\t交感神經"} />
             <button onClick={proceed} disabled={!fileConfirmed}
               className="btn-ink px-8 py-4 text-base mt-6 disabled:opacity-30">
               確認,前往分析 →
@@ -2131,10 +2105,9 @@ function WebinarArchiveChecklist({ onDone, latest, words, pW, notify }) {
             </div>
             {hasFeedback && (
               <div className="fb text-sm mb-6" style={{ color: "#555" }}>
-                {addedVocab.length > 0 && <>剛剛貼的 {addedVocab.length} 個生字已經加進 Word Bank(這台裝置馬上就能用)。</>}
-                {ratedCount > 0 && <>你對上週目標的自評也記下了。</>}
-                {hasNotes && <>你在 Webinar 進行中記的筆記({liveNotes.trim().length} 字)也會一起帶上,我會存進這場的筆記欄。</>}
-                按下面的按鈕會把 /webinar 指令和回饋 JSON 一起複製,直接貼給我就好,我會把生字同步進檔案、用自評做進步比較、並把你的筆記存進這場報告。
+                {ratedCount > 0 && <>你對上週目標的自評記下了。</>}
+                {hasNotes && <>你在 Webinar 進行中記的筆記({liveNotes.trim().length} 字)也會一起帶上,我會存進這場的筆記欄、並從裡面判斷要收哪些生字。</>}
+                按下面的按鈕會把 /webinar 指令和回饋 JSON 一起複製,直接貼給我就好,我會用你的筆記＋自評做進步比較與生字整理。
               </div>
             )}
             <div className="flex gap-3 flex-wrap mb-4">
