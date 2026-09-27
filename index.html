@@ -2223,7 +2223,7 @@ function WebinarTab({ webinar, pWe, slides = [], notify, jump, clearJump, goToRo
         <div className="grid" style={{ gridTemplateColumns: narrow ? "minmax(0, 1fr)" : "repeat(2, minmax(0, 1fr))" }}>
           {webinar.map((e, i) => {
             const quizCount = e.quiz
-              ? (e.quiz.correction?.length || 0) + (e.quiz.choice?.length || 0) + (e.quiz.pronunciation?.rows?.length || 0)
+              ? (e.quiz.correction?.length || 0) + (e.quiz.choice?.length || 0) + (e.quiz.order?.length || 0) + (e.quiz.pronunciation?.rows?.length || 0)
               : 0;
             const sections = buildSections(e);
             return (
@@ -2317,7 +2317,7 @@ function SlideReviewTab({ slides, pSl, webinar = [], notify, jump, clearJump, go
         <div className="grid" style={{ gridTemplateColumns: narrow ? "minmax(0, 1fr)" : "repeat(2, minmax(0, 1fr))" }}>
           {slides.map((e, i) => {
             const quizCount = e.quiz
-              ? (e.quiz.correction?.length || 0) + (e.quiz.choice?.length || 0) + (e.quiz.pronunciation?.rows?.length || 0)
+              ? (e.quiz.correction?.length || 0) + (e.quiz.choice?.length || 0) + (e.quiz.order?.length || 0) + (e.quiz.pronunciation?.rows?.length || 0)
               : 0;
             const sections = buildSections(e);
             const recorded = e.round && webinar.some((w) => w.round === e.round);
@@ -2807,6 +2807,24 @@ function SettingsTab({ accent, setAccent, voiceURI, setVoiceURI, notify }) {
     if (/^#?[0-9a-fA-F]{6}$/.test(v.trim())) setAccent(v);
   }
 
+  // User-saved swatches: extra preset dots the user adds (the current colour) and can delete. Kept in
+  // localStorage per-device like `accent` itself — not in BACKUP_KEYS, so it's a UI pref that doesn't sync.
+  const [swatches, setSwatches] = useState(() => {
+    try { const v = JSON.parse(localStorage.getItem("accentSwatches")); return Array.isArray(v) ? v : []; } catch { return []; }
+  });
+  const builtInHexes = new Set(ACCENT_PRESETS.map((p) => normHex(p.hex)));
+  function addSwatch() {
+    const h = normHex(cur);
+    if (builtInHexes.has(h) || swatches.some((s) => normHex(s) === h)) { notify && notify("這個顏色已經在色票裡了"); return; }
+    const next = [...swatches, h];
+    setSwatches(next); saveKey("accentSwatches", next);
+    notify && notify("已加入色票");
+  }
+  function delSwatch(hex) {
+    const next = swatches.filter((s) => normHex(s) !== normHex(hex));
+    setSwatches(next); saveKey("accentSwatches", next);
+  }
+
   // English TTS voices load asynchronously (getVoices() often starts empty until voiceschanged).
   const [voices, setVoices] = useState(canSpeak ? enVoices() : []);
   useEffect(() => {
@@ -2839,18 +2857,36 @@ function SettingsTab({ accent, setAccent, voiceURI, setVoiceURI, notify }) {
                 </button>
               );
             })}
+            {swatches.map((hex) => {
+              const sel = normHex(hex) === cur;
+              return (
+                <div key={hex} className="relative flex flex-col items-center gap-1.5 py-3"
+                  style={{ border: sel ? `2px solid ${INK}` : "1px solid #cfcfc8" }}>
+                  <button onClick={() => setAccent(hex)} title={hex}
+                    className="flex flex-col items-center gap-1.5" style={{ background: "transparent", cursor: "pointer" }}>
+                    <span style={{ width: 30, height: 30, borderRadius: 999, background: hex, border: "1px solid rgba(0,0,0,.15)",
+                      boxShadow: sel ? `0 0 0 3px ${PAPER}, 0 0 0 4px ${INK}` : "none" }} />
+                    <span className="fh" style={{ fontSize: 10, color: sel ? INK : "#777", letterSpacing: "0.03em" }}>{normHex(hex)}</span>
+                  </button>
+                  <button onClick={() => delSwatch(hex)} title="刪除色票" aria-label="刪除色票"
+                    className="absolute" style={{ top: 2, right: 2, width: 18, height: 18, lineHeight: "15px", textAlign: "center",
+                      border: `1px solid ${INK}`, background: PAPER, color: INK, fontSize: 12, cursor: "pointer", borderRadius: 999, padding: 0 }}>×</button>
+                </div>
+              );
+            })}
           </div>
         </Cell>
         <Cell tag="自訂 Custom" className="hair-b">
-          <div className="flex items-center gap-3">
+          <div className="flex items-center gap-3 flex-wrap">
             <input type="color" value={cur} onChange={(e) => setAccent(e.target.value)}
               style={{ width: 52, height: 40, border: `1px solid ${INK}`, background: "transparent", cursor: "pointer", padding: 2 }} />
             <input value={draft} onChange={(e) => onHex(e.target.value)}
               onBlur={() => setDraft(cur)}
               autoCapitalize="none" autoCorrect="off" spellCheck={false}
               className="fh px-3 py-2 text-base" style={{ border: `1px solid ${INK}`, background: "transparent", width: 130, letterSpacing: "0.04em" }} />
+            <button onClick={addSwatch} className="btn-ghost px-4 py-2 text-sm">＋ 加入色票</button>
           </div>
-          <div className="fb text-xs mt-2" style={{ color: "#666" }}>可輸入任意 #RRGGBB 十六進位色碼</div>
+          <div className="fb text-xs mt-2" style={{ color: "#666" }}>可輸入任意 #RRGGBB 十六進位色碼。選好顏色後按「加入色票」存成常用色,之後點色票就能一鍵套用;色票右上角 × 可刪除。</div>
         </Cell>
         <Cell tag="還原 Reset" className={canSpeak ? "hair-b" : ""}>
           <button onClick={() => { setAccent(DEFAULT_ACCENT); notify && notify("已還原預設主題色"); }}
@@ -3194,7 +3230,26 @@ function PresentMode({ entry, onClose, kind }) {
   );
 }
 
-// ---------------- Practice mode: correction / choice / pronunciation quiz ----------------
+// Word-order (排列句子) helpers: a stable per-sentence scramble (deterministic seed so tiles don't
+// reshuffle on every render) and a lenient compare (case/punctuation-insensitive, like EER grading).
+function orderTokens(sentence) {
+  const arr = String(sentence).trim().split(/\s+/).map((tok, id) => ({ id, tok }));
+  let seed = 0;
+  for (let i = 0; i < sentence.length; i++) seed = (seed * 31 + sentence.charCodeAt(i)) >>> 0;
+  const rnd = () => { seed = (seed * 1103515245 + 12345) >>> 0; return seed / 4294967296; };
+  for (let i = arr.length - 1; i > 0; i--) {
+    const j = Math.floor(rnd() * (i + 1));
+    const t = arr[i]; arr[i] = arr[j]; arr[j] = t;
+  }
+  if (arr.length > 1 && arr.every((x, i) => x.id === i)) arr.push(arr.shift()); // never hand back the answer already in order
+  return arr;
+}
+function sameSentence(a, b) {
+  const norm = (s) => String(s).toLowerCase().replace(/[^\w\s]/g, "").replace(/\s+/g, " ").trim();
+  return norm(a) === norm(b);
+}
+
+// ---------------- Practice mode: correction / choice / word-order / pronunciation quiz ----------------
 // Ported from the old standalone quiz_template.html — same scoring + regex-key matching +
 // clipboard export, reskinned into the paper/hairline/pill visual language.
 function PracticeMode({ entry, onClose, notify }) {
@@ -3209,8 +3264,9 @@ function PracticeMode({ entry, onClose, notify }) {
   if (!allState) return null;
 
   const myState = allState[entry.id] || {};
-  const quiz = entry.quiz || { correction: [], choice: [], pronunciation: { intro: "", rows: [], tip: "" } };
+  const quiz = entry.quiz || { correction: [], choice: [], order: [], pronunciation: { intro: "", rows: [], tip: "" } };
   const pron = quiz.pronunciation || { intro: "", rows: [], tip: "" };
+  const order = quiz.order || [];
 
   function set(key, val) {
     setAllState((prev) => {
@@ -3232,9 +3288,17 @@ function PracticeMode({ entry, onClose, notify }) {
     if (sel == null) return;
     set("rm" + i, Number(sel) === q.correct);
   }
+  function checkOrder(i) {
+    const placed = myState["o" + i] || [];
+    if (!placed.length) return;
+    const toks = orderTokens(order[i].answer);
+    const built = placed.map((id) => (toks.find((t) => t.id === id) || {}).tok).join(" ");
+    set("ro" + i, sameSentence(built, order[i].answer));
+  }
   function checkAll() {
     quiz.correction.forEach((_, i) => checkCorrection(i));
     quiz.choice.forEach((_, i) => checkChoice(i));
+    order.forEach((_, i) => checkOrder(i));
   }
   function exportResults() {
     let out = `${sessionLabel(entry) || `Webinar ${fmtDate(entry.date)}`} 練習題作答結果(請幫我逐題批改講解)\n\n【改錯題】\n`;
@@ -3246,16 +3310,23 @@ function PracticeMode({ entry, onClose, notify }) {
       const sel = myState["m" + i];
       out += `${quiz.correction.length + i + 1}. ${q.prompt}\n   我選:${sel != null ? q.options[sel] : "(未作答)"}\n`;
     });
+    out += `\n【排列句子】\n`;
+    order.forEach((q, i) => {
+      const toks = orderTokens(q.answer);
+      const built = (myState["o" + i] || []).map((id) => (toks.find((t) => t.id === id) || {}).tok).join(" ");
+      out += `${quiz.correction.length + quiz.choice.length + i + 1}. ${q.translation || q.answer}\n   我排的:${built || "(未作答)"}\n`;
+    });
     copyText(out).then((ok) => {
       if (ok) { setManualExport(""); notify("已複製到剪貼簿"); }
       else { setManualExport(out); notify("無法自動複製,請從下方框手動複製"); }
     });
   }
 
-  const total = quiz.correction.length + quiz.choice.length;
+  const total = quiz.correction.length + quiz.choice.length + order.length;
   let got = 0;
   quiz.correction.forEach((_, i) => { if (myState["rc" + i]) got++; });
   quiz.choice.forEach((_, i) => { if (myState["rm" + i]) got++; });
+  order.forEach((_, i) => { if (myState["ro" + i]) got++; });
   const empty = total === 0 && pron.rows.length === 0;
 
   return (
@@ -3350,10 +3421,69 @@ function PracticeMode({ entry, onClose, notify }) {
           </>
         )}
 
+        {order.length > 0 && (
+          <>
+            <div className="hair-b px-5 py-2.5">
+              <span className="pill pill-solid">三、排列句子</span>
+              <span className="fb text-xs ml-2" style={{ color: "#777" }}>點字卡照正確語序排好</span>
+            </div>
+            {order.map((q, i) => {
+              const toks = orderTokens(q.answer);
+              const placed = myState["o" + i] || [];
+              const placedSet = new Set(placed);
+              return (
+                <div key={i} className="hair-b px-5 py-5">
+                  <div className="flex items-center gap-2 mb-2">
+                    <span className="pill pill-line">{quiz.correction.length + quiz.choice.length + i + 1}</span>
+                    {q.ts && <span className="fb text-xs" style={{ color: "#777" }}>[{q.ts}]</span>}
+                  </div>
+                  {q.translation && <div className="fb text-sm mb-3" style={{ color: "#555" }}>{q.translation}</div>}
+                  <div className="flex flex-wrap gap-2 px-3 py-3 mb-3" style={{ border: `1px solid ${INK}`, minHeight: 52 }}>
+                    {placed.length === 0 && <span className="fb text-xs" style={{ color: "#aaa" }}>從下面點字卡排到這裡…</span>}
+                    {placed.map((id) => {
+                      const t = toks.find((x) => x.id === id);
+                      return (
+                        <button key={id} onClick={() => set("o" + i, placed.filter((x) => x !== id))}
+                          className="fh text-sm px-3 py-1.5" style={{ border: `1px solid ${INK}`, background: INK, color: PAPER }}>
+                          {t ? t.tok : ""}
+                        </button>
+                      );
+                    })}
+                  </div>
+                  <div className="flex flex-wrap gap-2">
+                    {toks.filter((t) => !placedSet.has(t.id)).map((t) => (
+                      <button key={t.id} onClick={() => set("o" + i, [...placed, t.id])}
+                        className="fh text-sm px-3 py-1.5" style={{ border: `1px solid ${INK}`, background: "transparent", color: INK }}>
+                        {t.tok}
+                      </button>
+                    ))}
+                  </div>
+                  <div className="flex items-center gap-3 mt-3 flex-wrap">
+                    <button onClick={() => checkOrder(i)} className="btn-ghost px-4 py-2 text-xs">對答案</button>
+                    {placed.length > 0 && (
+                      <button onClick={() => set("o" + i, [])} className="fb text-xs underline" style={{ color: "#888" }}>清空</button>
+                    )}
+                    {myState["ro" + i] !== undefined && (
+                      <span className={`pill ${myState["ro" + i] ? "pill-green" : "pill-solid"}`}>
+                        {myState["ro" + i] ? <><Ico name="check" size={12} /> 順序正確</> : <><Ico name="cross" size={12} /> 再排一次</>}
+                      </span>
+                    )}
+                  </div>
+                  {myState["ro" + i] === false && (
+                    <div className="fb text-sm mt-2" style={{ color: "#555" }}>
+                      參考答案:<span className="fh font-bold" style={{ color: INK }}> {q.answer}</span>{q.note ? <><br />{q.note}</> : null}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </>
+        )}
+
         {pron.rows.length > 0 && (
           <>
             <div className="hair-b px-5 py-2.5">
-              <span className="pill pill-solid">三、發音朗讀組</span>
+              <span className="pill pill-solid">四、發音朗讀組</span>
               <span className="fb text-xs ml-2" style={{ color: "#777" }}>每組大聲念 5 次,念完打勾</span>
             </div>
             <div className="px-5 py-5">
