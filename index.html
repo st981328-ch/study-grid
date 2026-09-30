@@ -513,6 +513,51 @@ function shuffle(arr) {
   for (let i = a.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [a[i], a[j]] = [a[j], a[i]]; }
   return a;
 }
+
+// Quiz-question targeting: a lot of Word Bank entries teach a specific point, not a meaning — the
+// preposition in "apply to" / "hooked on", or a collocation verb. wordFocus() finds that point so
+// the Daily Quiz can blank it (choose the right preposition/verb) instead of always asking for the
+// Chinese meaning. Explicit "quotes"/『』 around a token win; otherwise a trailing/embedded
+// preposition in the phrase is used. Messy entries (alternatives with /, notes in (), Chinese) are
+// left as plain meaning questions.
+const WORD_PREPS = ["to", "for", "at", "in", "on", "with", "of", "from", "about", "into", "by", "as",
+  "over", "off", "up", "out", "through", "against", "between", "around", "without", "upon", "than", "onto"];
+const FOCUS_VERBS = ["spend", "take", "make", "do", "have", "give", "pay", "keep", "get", "cost", "put", "set", "hold", "draw", "run"];
+const PREP_OPTS = ["to", "for", "at", "in", "on", "with", "of", "from", "about", "into", "by", "as", "off", "up", "out", "over"];
+const VERB_OPTS = ["take", "make", "do", "have", "give", "pay", "keep", "get", "cost", "put", "spend", "set"];
+
+function focusKindOf(tok) {
+  const t = tok.toLowerCase();
+  if (WORD_PREPS.includes(t)) return "prep";
+  if (FOCUS_VERBS.includes(t)) return "verb";
+  return "other";
+}
+function wordFocus(word) {
+  if (!word) return null;
+  const qm = word.match(/["“”「」『』‘’]([A-Za-z][A-Za-z-]*)["“”「」『』‘’]/); // explicit marker wins
+  if (qm) {
+    const tok = qm[1], kind = focusKindOf(tok);
+    if (kind === "other") return null;
+    const clean = word.replace(/["“”「」『』‘’]/g, "");
+    const i = clean.toLowerCase().indexOf(tok.toLowerCase());
+    return { token: tok, kind, before: clean.slice(0, i).trim(), after: clean.slice(i + tok.length).trim() };
+  }
+  if (/[／/]|[（(]|[一-鿿]/.test(word)) return null; // skip alternatives / notes / Chinese
+  const toks = word.trim().split(/\s+/);
+  if (toks.length < 2) return null;
+  const bare = (t) => t.toLowerCase().replace(/[^a-z]/g, "");
+  let idx = WORD_PREPS.includes(bare(toks[toks.length - 1])) ? toks.length - 1
+    : toks.findIndex((t) => WORD_PREPS.includes(bare(t)));
+  if (idx < 0) return null;
+  const tok = toks[idx].replace(/[^A-Za-z-]/g, "");
+  if (!tok) return null;
+  return { token: tok, kind: "prep", before: toks.slice(0, idx).join(" "), after: toks.slice(idx + 1).join(" ") };
+}
+function blankFocus(text, token) {
+  if (!text || !token) return null;
+  const re = new RegExp("\\b" + token.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "\\b", "i");
+  return re.test(text) ? text.replace(re, "＿＿＿") : null;
+}
 function nextWeekend() {
   const d = new Date(); const diff = (6 - d.getDay() + 7) % 7;
   d.setDate(d.getDate() + diff); return d.toISOString().slice(0, 10);
@@ -1270,6 +1315,7 @@ function QuizTab({ words, pW, history, pH, notify }) {
   const [typed, setTyped] = useState("");
   const [results, setResults] = useState([]);
   const [options, setOptions] = useState([]);
+  const [question, setQuestion] = useState(null); // choice-mode question descriptor: meaning vs focus (prep/verb)
 
   const todayEntry = history.find((h) => h.date === todayISO());
   const narrow = useNarrow();
@@ -1299,11 +1345,25 @@ function QuizTab({ words, pW, history, pH, notify }) {
     setPhase("running");
   }
 
+  // Choice mode builds one of two questions per word: test the teaching point (blank the preposition
+  // / collocation verb, pick from same-category options) when the word has one, else the old meaning
+  // MC. Focus-eligible words get the point ~60% of the time so meaning still shows up (mixed, per the
+  // user's "可以考意思也可以考介系詞"). Runs once per word (idx change), like the old options effect.
   useEffect(() => {
     if (phase !== "running" || mode !== "choice" || !queue[idx]) return;
-    const correct = queue[idx];
-    const pool = words.filter((w) => w.id !== correct.id);
-    setOptions(shuffle([correct.meaning, ...shuffle(pool).slice(0, 3).map((w) => w.meaning)]));
+    const cur = queue[idx];
+    const fw = wordFocus(cur.word);
+    if (fw && (fw.kind === "prep" || fw.kind === "verb") && Math.random() < 0.6) {
+      const pool = fw.kind === "prep" ? PREP_OPTS : VERB_OPTS;
+      const distract = shuffle(pool.filter((p) => p.toLowerCase() !== fw.token.toLowerCase())).slice(0, 3);
+      setOptions(shuffle([fw.token, ...distract]));
+      setQuestion({ kind: "focus", focusKind: fw.kind, correct: fw.token, before: fw.before, after: fw.after,
+        hint: cur.meaning, example: blankFocus(cur.example, fw.token) });
+    } else {
+      const pool = words.filter((w) => w.id !== cur.id);
+      setOptions(shuffle([cur.meaning, ...shuffle(pool).slice(0, 3).map((w) => w.meaning)]));
+      setQuestion({ kind: "meaning", correct: cur.meaning });
+    }
   }, [idx, phase, mode, queue, words]);
 
   // Auto-play the word when a listen/dictation question appears; the user can replay via the button.
@@ -1325,7 +1385,7 @@ function QuizTab({ words, pW, history, pH, notify }) {
 
   function submitChoice(m) {
     if (answered) return;
-    const ok = m === queue[idx].meaning;
+    const ok = m === (question ? question.correct : queue[idx].meaning);
     setAnswered({ ok, chosen: m });
     setResults((r) => [...r, { id: queue[idx].id, ok }]);
   }
@@ -1453,10 +1513,25 @@ function QuizTab({ words, pW, history, pH, notify }) {
           </div>
           <div className={`flex-1 flex flex-col items-start justify-center ${narrow ? "px-5 py-6" : "px-8 py-8"}`}>
             {mode === "choice" ? (
-              <div className="fh flex items-center gap-3" style={{ fontWeight: 800, fontSize: "clamp(32px,5vw,56px)", lineHeight: 1 }}>
-                {w.word}
-                <Speaker text={w.word} size={26} />
-              </div>
+              question && question.kind === "focus" ? (
+                <div className="flex flex-col items-start gap-3">
+                  <div className="fh flex items-center flex-wrap gap-x-3 gap-y-1" style={{ fontWeight: 800, fontSize: "clamp(26px,4vw,46px)", lineHeight: 1.1 }}>
+                    {question.before && <span>{question.before}</span>}
+                    <span style={{ borderBottom: `4px solid ${INK}`, minWidth: 70, display: "inline-block", height: "0.9em" }} />
+                    {question.after && <span>{question.after}</span>}
+                  </div>
+                  <div className="flex items-center gap-2 mt-1">
+                    <span className="pill pill-line">{question.focusKind === "prep" ? "填入介系詞" : "填入正確的字"}</span>
+                    {question.hint && <span className="fb text-sm" style={{ color: "#777" }}>{question.hint}</span>}
+                  </div>
+                  {question.example && <div className="fb text-sm italic" style={{ color: "#9a9a92" }}>{question.example}</div>}
+                </div>
+              ) : (
+                <div className="fh flex items-center gap-3" style={{ fontWeight: 800, fontSize: "clamp(32px,5vw,56px)", lineHeight: 1 }}>
+                  {w.word}
+                  <Speaker text={w.word} size={26} />
+                </div>
+              )
             ) : mode === "listen" ? (
               <>
                 <button onClick={() => speak(w.word)} className="btn-ink flex items-center gap-3 px-8 py-6 text-xl">
@@ -1491,9 +1566,9 @@ function QuizTab({ words, pW, history, pH, notify }) {
                 <span className={`pill ${answered.ok ? "pill-green" : "pill-solid"}`} style={{ padding: "8px 18px", fontSize: 13 }}>
                   {answered.ok ? <><Ico name="check" size={13} /> Correct 答對</> : <><Ico name="cross" size={13} /> Wrong 答錯</>}
                 </span>
-                {mode !== "choice" && (
+                {(mode !== "choice" || (question && question.kind === "focus")) && (
                   <div className="fb mt-3 text-sm flex items-center gap-2">
-                    {answered.ok ? "單字:" : "正確答案:"}
+                    {question && question.kind === "focus" ? "完整用法:" : (answered.ok ? "單字:" : "正確答案:")}
                     <span className="fh font-bold text-lg">{w.word}</span>
                     <Speaker text={w.word} />
                   </div>
@@ -1507,12 +1582,12 @@ function QuizTab({ words, pW, history, pH, notify }) {
         {/* Right: answers */}
         <div className="flex flex-col">
           <div className="hair-b px-4 py-2.5">
-            <span className="pill pill-solid">{mode === "choice" ? "Choose 選出意思" : mode === "listen" ? "Type 聽音拼寫" : mode === "cloze" ? "Type 填入空格" : "Type 輸入拼寫"}</span>
+            <span className="pill pill-solid">{mode === "choice" ? (question && question.kind === "focus" ? "Choose 選出正確的字" : "Choose 選出意思") : mode === "listen" ? "Type 聽音拼寫" : mode === "cloze" ? "Type 填入空格" : "Type 輸入拼寫"}</span>
           </div>
           <div className="flex-1 flex flex-col justify-center px-6 py-6 gap-3">
             {mode === "choice" ? options.map((opt) => {
               const isChosen = answered && answered.chosen === opt;
-              const isRight = answered && opt === w.meaning;
+              const isRight = answered && opt === (question ? question.correct : w.meaning);
               let style = { border: `1px solid ${INK}`, background: "transparent" };
               if (answered) {
                 if (isRight) style = { border: `1px solid ${INK}`, background: GREEN, color: "var(--accent-text)" };
