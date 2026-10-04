@@ -688,7 +688,7 @@ function Ico({ name, size = 13, color, style }) {
 // Everything the user builds up (wordbank incl. manual adds, quiz history, streak, webinar quiz
 // answers, error bank) lives only in this one browser's localStorage — the seed block only carries
 // what the skill writes. A JSON export/import lets it survive a device switch or a cleared cache.
-const BACKUP_KEYS = ["wordbank", "quizHistory", "webinarEntries", "slideReviews", "errorBank", "webinarQuizState", "deletedWordIds", "webinarNotes", "webinarLiveNotes"];
+const BACKUP_KEYS = ["wordbank", "quizHistory", "webinarEntries", "slideReviews", "errorBank", "webinarQuizState", "deletedWordIds", "webinarNotes", "webinarLiveNotes", "accentSwatches"];
 async function exportBackup() {
   const data = { _type: "study-grid-backup", _v: 1, exportedAt: new Date().toISOString() };
   for (const k of BACKUP_KEYS) data[k] = await loadKey(k, null);
@@ -2882,8 +2882,9 @@ function SettingsTab({ accent, setAccent, voiceURI, setVoiceURI, notify }) {
     if (/^#?[0-9a-fA-F]{6}$/.test(v.trim())) setAccent(v);
   }
 
-  // User-saved swatches: extra preset dots the user adds (the current colour) and can delete. Kept in
-  // localStorage per-device like `accent` itself — not in BACKUP_KEYS, so it's a UI pref that doesn't sync.
+  // User-saved swatches: extra preset dots the user adds (the current colour) and can delete. In
+  // BACKUP_KEYS, so the swatch LIST syncs across devices. The current `accent` selection stays
+  // per-device (not synced) — adding a swatch shares the colour, it doesn't force every device to it.
   const [swatches, setSwatches] = useState(() => {
     try { const v = JSON.parse(localStorage.getItem("accentSwatches")); return Array.isArray(v) ? v : []; } catch { return []; }
   });
