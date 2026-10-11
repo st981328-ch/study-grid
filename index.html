@@ -595,12 +595,6 @@ function cardSpecs(w) {
   return [{ kind: "meaning" }];
 }
 // Authoring helpers shared by the add form (BankTab) and the edit panel (WordDetail).
-const TYPE_HINT = {
-  meaning: "考中文意思。例:past tense、A has got nothing on B(當片語意思考)",
-  prep: "考搭配的介系詞。標出要考的介系詞,可勾也考意思。例:apply to、impact on",
-  colloc: "考該用哪個字。標出考點字+候選字。例:make an offer(make/give)",
-  mc: "自己寫題幹+選項+解析,給不好歸類的用法。例:impact 動詞不加 on",
-};
 function blankCardForm(qtype) {
   return { qtype: qtype || "meaning", word: "", meaning: "", example: "",
     target: "", options: "", alsoMeaning: false, note: "",
@@ -615,28 +609,25 @@ function cardToForm(w) {
   if (w.mc) { f.mcPrompt = w.mc.prompt || ""; f.mcOptions = (w.mc.options || []).join("\n"); f.mcCorrect = w.mc.correct || 0; f.mcExplain = w.mc.explain || ""; }
   return f;
 }
-// Build the type-specific card fields from a form. Returns {patch} or {err}. Irrelevant fields are
-// nulled so switching a card's type clears stale data (cardSpecs treats null target/options/mc as absent).
+// Build the card fields from a form. Returns {patch} or {err}. Irrelevant fields are nulled so
+// switching a card's type clears stale data (cardSpecs treats null target/options/mc/answer as absent).
+// 一般卡: the 考點 is whichever word the user highlighted (`target`). No highlight -> meaning card; a
+// highlighted preposition -> prep card; any other highlighted word -> collocation card.
 function cardFieldsFromForm(f) {
-  const q = f.qtype;
-  if (q === "mc") {
+  if (f.qtype === "mc") {
     const opts = f.mcOptions.split("\n").map((s) => s.trim()).filter(Boolean);
     if (!f.mcPrompt.trim() || opts.length < 2) return { err: "選擇題需要題幹與至少兩個選項" };
     const correct = Math.min(Math.max(0, Number(f.mcCorrect) || 0), opts.length - 1);
     return { patch: { qtype: "mc", mc: { prompt: f.mcPrompt.trim(), options: opts, correct, explain: f.mcExplain.trim() },
-      note: f.note.trim() || null, target: null, options: null, focus: null } };
+      note: f.note.trim() || null, target: null, options: null, focus: null, answer: null, translation: null } };
   }
-  if (q === "prep" || q === "colloc") {
-    const target = f.target.trim();
-    if (!target) return { err: q === "prep" ? "請標出要考的介系詞" : "請標出要考的字" };
-    const patch = { qtype: q, target: q === "prep" ? target.toLowerCase() : target,
-      focus: f.alsoMeaning ? ["target", "meaning"] : ["target"], note: f.note.trim() || null, mc: null };
-    patch.options = q === "colloc"
-      ? ((o) => (o.length ? o : null))(f.options.split(/[,，\n]/).map((s) => s.trim()).filter(Boolean))
-      : null;
-    return { patch };
-  }
-  return { patch: { qtype: "meaning", target: null, options: null, focus: null, mc: null, note: f.note.trim() || null } };
+  const target = (f.target || "").trim();
+  if (!target) return { patch: { qtype: "meaning", target: null, options: null, focus: null, mc: null, note: f.note.trim() || null, answer: null, translation: null } };
+  const isPrep = WORD_PREPS.includes(target.toLowerCase().replace(/[^a-z]/g, ""));
+  const patch = { qtype: isPrep ? "prep" : "colloc", target: isPrep ? target.toLowerCase() : target,
+    focus: f.alsoMeaning ? ["target", "meaning"] : ["target"], note: f.note.trim() || null, mc: null, answer: null, translation: null };
+  patch.options = isPrep ? null : ((o) => (o.length ? o : null))(f.options.split(/[,，\n]/).map((s) => s.trim()).filter(Boolean));
+  return { patch };
 }
 
 function nextWeekend() {
@@ -1906,29 +1897,44 @@ function QuizTab({ words, pW, history, pH, notify }) {
   );
 }
 
-// Type picker + adaptive fields for authoring a knowledge card. Shared by the 新增 cell (BankTab)
-// and the 編輯考點 panel (WordDetail). `ns` namespaces the MC radio group so two instances don't clash.
+// Authoring UI for a knowledge card. Two modes: 一般卡 (type a word/phrase, then TAP a word to
+// highlight it as the 考點 — no tap = test meaning, a preposition = prep question, any other word =
+// collocation question) and 選擇題 (a self-contained MC the user writes). Shared by the 新增 cell
+// (BankTab) and the 編輯考點 panel (WordDetail). `ns` namespaces the MC radio group.
 function CardFormFields({ form, setForm, ns }) {
   const set = (patch) => setForm({ ...form, ...patch });
   const inp = { border: `1px solid ${INK}`, background: "transparent" };
+  const isMc = form.qtype === "mc";
+  const bare = (t) => String(t).toLowerCase().replace(/[^a-z]/g, "");
+  const tokens = (form.word || "").trim().split(/\s+/).filter(Boolean);
+  const canHighlight = tokens.length >= 2;
+  const targetBare = bare(form.target || "");
+  const selIdx = form.target ? tokens.findIndex((t) => bare(t) === targetBare) : -1;
+  const hasTarget = selIdx >= 0;
+  const isPrepTok = hasTarget && WORD_PREPS.includes(targetBare);
+  const kindHint = !hasTarget ? "不點任何字 → 考意思"
+    : `考「${tokens[selIdx].replace(/[^A-Za-z'’-]/g, "")}」（${isPrepTok ? "介系詞" : "搭配詞"}）`;
   const mcOpts = form.mcOptions.split("\n").map((s) => s.trim()).filter(Boolean);
-  const isPrep = form.qtype === "prep", isColloc = form.qtype === "colloc", isMc = form.qtype === "mc";
+  function onWord(v) {
+    const toks = v.trim().split(/\s+/).map(bare);
+    set({ word: v, target: toks.includes(targetBare) ? form.target : "" });
+  }
+  function tapToken(i) {
+    const tok = tokens[i].replace(/[^A-Za-z'’-]/g, "");
+    set({ target: bare(tok) === targetBare ? "" : tok });
+  }
   return (
     <div className="flex flex-col gap-2">
-      <div className="flex gap-1.5 flex-wrap">
-        {CARD_TYPES.map(([key, zh]) => (
-          <button key={key} onClick={() => set({ qtype: key })}
-            className={`pill ${form.qtype === key ? "pill-solid" : "pill-line"}`}
-            style={{ fontSize: 11, padding: "3px 10px" }}>{zh}</button>
-        ))}
+      <div className="flex gap-1.5">
+        <button onClick={() => set({ qtype: "meaning" })} className={`pill ${!isMc ? "pill-solid" : "pill-line"}`} style={{ fontSize: 11, padding: "3px 12px" }}>一般卡</button>
+        <button onClick={() => set({ qtype: "mc" })} className={`pill ${isMc ? "pill-solid" : "pill-line"}`} style={{ fontSize: 11, padding: "3px 12px" }}>選擇題</button>
       </div>
-      <div className="fb text-xs" style={{ color: "#888" }}>{TYPE_HINT[form.qtype]}</div>
-      <input value={form.word} onChange={(e) => set({ word: e.target.value })}
-        placeholder={isMc ? "卡片標題 如 impact(動詞/名詞)" : "word 單字/片語"} className="px-3 py-2.5 text-sm" style={inp} />
-      <input value={form.meaning} onChange={(e) => set({ meaning: e.target.value })}
-        placeholder={isMc ? "意思(選填)" : "meaning 意思"} className="px-3 py-2.5 text-sm" style={inp} />
       {isMc ? (
         <>
+          <input value={form.word} onChange={(e) => set({ word: e.target.value })}
+            placeholder="卡片標題 如 impact(動詞/名詞)" className="px-3 py-2.5 text-sm" style={inp} />
+          <input value={form.meaning} onChange={(e) => set({ meaning: e.target.value })}
+            placeholder="意思(選填)" className="px-3 py-2.5 text-sm" style={inp} />
           <textarea value={form.mcPrompt} onChange={(e) => set({ mcPrompt: e.target.value })} rows={2}
             placeholder="題幹,用 ＿＿＿ 當空格  如 This will ＿＿＿ our plan." className="w-full px-3 py-2.5 text-sm resize-none" style={inp} />
           <textarea value={form.mcOptions} onChange={(e) => set({ mcOptions: e.target.value })} rows={3}
@@ -1949,23 +1955,37 @@ function CardFormFields({ form, setForm, ns }) {
         </>
       ) : (
         <>
+          <input value={form.word} onChange={(e) => onWord(e.target.value)}
+            placeholder="word 單字/片語" className="px-3 py-2.5 text-sm" style={inp} />
+          {canHighlight && (
+            <div className="flex flex-col gap-1">
+              <div className="fb text-xs" style={{ color: hasTarget ? INK : "#888" }}>點一個字＝反白當考點 · {kindHint}</div>
+              <div className="flex flex-wrap gap-1.5">
+                {tokens.map((t, i) => {
+                  const sel = i === selIdx;
+                  return (
+                    <button key={i} onClick={() => tapToken(i)} title="點選當考點" className="fb text-sm"
+                      style={{ border: `1px solid ${INK}`, padding: "4px 10px", cursor: "pointer", background: sel ? INK : "transparent", color: sel ? PAPER : INK }}>{t}</button>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+          <input value={form.meaning} onChange={(e) => set({ meaning: e.target.value })}
+            placeholder="meaning 意思" className="px-3 py-2.5 text-sm" style={inp} />
           <input value={form.example} onChange={(e) => set({ example: e.target.value })}
             placeholder="example 例句(選填)" className="px-3 py-2.5 text-sm" style={inp} />
-          {(isPrep || isColloc) && (
-            <input value={form.target} onChange={(e) => set({ target: e.target.value })}
-              placeholder={isPrep ? "考點:要考的介系詞 如 to" : "考點:要考的字 如 make"} className="px-3 py-2.5 text-sm" style={inp} />
-          )}
-          {isColloc && (
+          {hasTarget && !isPrepTok && (
             <input value={form.options} onChange={(e) => set({ options: e.target.value })}
-              placeholder="候選字,逗號分隔 如 make, give, do" className="px-3 py-2.5 text-sm" style={inp} />
+              placeholder="其他選項,逗號分隔(留空用常見動詞) 如 give, do, take" className="px-3 py-2.5 text-sm" style={inp} />
           )}
-          {(isPrep || isColloc) && (
+          {hasTarget && (
             <label className="flex items-center gap-2 fb text-sm" style={{ cursor: "pointer" }}>
               <input type="checkbox" checked={!!form.alsoMeaning} onChange={(e) => set({ alsoMeaning: e.target.checked })} />
-              <span>也考意思(複選)</span>
+              <span>也考意思(有時考考點、有時考意思)</span>
             </label>
           )}
-          {(isPrep || isColloc) && (
+          {hasTarget && (
             <input value={form.note} onChange={(e) => set({ note: e.target.value })}
               placeholder="提示/解析(選填) 如 當名詞才加 on" className="px-3 py-2.5 text-sm" style={inp} />
           )}
@@ -2242,6 +2262,12 @@ function WordDetail({ w, onClose, onEdit, onSuspend, onReset, onDelete }) {
                   ))}</div>
                 </div>
               )}
+              {w.qtype === "order" && w.answer && (
+                <div className="fb text-sm mt-3" style={{ color: "#555" }}>
+                  語序題:<span className="fh font-bold" style={{ color: INK }}> {w.answer}</span>
+                  {w.translation && <span style={{ color: "#888" }}>　{w.translation}</span>}
+                </div>
+              )}
               {w.note && <div className="fb text-sm mt-2" style={{ color: "#555" }}>{w.note}</div>}
               {leech && !w.suspended && (
                 <div className="fb text-xs mt-3 px-3 py-2" style={{ color: RED, border: `1px solid ${RED}` }}>
@@ -2258,7 +2284,9 @@ function WordDetail({ w, onClose, onEdit, onSuspend, onReset, onDelete }) {
               </div>
             </div>
             <div className="hair-t flex items-center gap-2 px-5 py-3 flex-wrap">
-              <button onClick={() => { setEf(cardToForm(w)); setEditing(true); }} className="btn-ghost px-4 py-2 text-sm"><Ico name="pencil" size={13} /> 編輯考點</button>
+              {w.qtype !== "order" && (
+                <button onClick={() => { setEf(cardToForm(w)); setEditing(true); }} className="btn-ghost px-4 py-2 text-sm"><Ico name="pencil" size={13} /> 編輯考點</button>
+              )}
               <button onClick={onSuspend} className="btn-ghost px-4 py-2 text-sm">{w.suspended ? <><Ico name="play" size={13} /> 恢復排程</> : <><Ico name="pause" size={13} /> 暫停出題</>}</button>
               <button onClick={onReset} className="btn-ghost px-4 py-2 text-sm"><Ico name="reset" size={13} /> 進度歸零</button>
               <button onClick={onDelete} className="fb text-xs underline" style={{ color: "#888", marginLeft: "auto" }}>刪除</button>
