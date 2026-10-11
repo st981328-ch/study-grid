@@ -676,17 +676,19 @@ function hasCloze(w) { return !!(w.example && w.word && new RegExp(escRe(w.word.
 function clozeText(w) {
   return w.example.replace(new RegExp(escRe(w.word.trim()), "ig"), "____");
 }
-// Meaning shown as a hint under the blank. Strip any English so usage notes like
-// "與…相似(不是 similar with)" don't reveal the answer word: drop parentheticals that contain
-// Latin letters, then mask any remaining Latin run. Pure-Chinese meanings pass through unchanged.
-function clozeHint(w) {
-  return String(w.meaning || "")
+// Strip English from a Chinese meaning so the English answer can't be read off it: drop
+// parentheticals that contain Latin letters, then mask any remaining Latin run with "…". Used for
+// the cloze hint AND for the 選意思 options (a card whose meaning embeds its own headword — e.g.
+// "in good shape（非 in a good body situation）" — would otherwise hand over the answer).
+function maskEnglish(s) {
+  return String(s || "")
     .replace(/[(（][^)）]*[)）]/g, (m) => (/[A-Za-z]/.test(m) ? "" : m))
     .replace(/[A-Za-z][A-Za-z'’.\-]*/g, "…")
     .replace(/(?:…\s*){2,}/g, "… ")
     .replace(/\s{2,}/g, " ")
     .trim();
 }
+function clozeHint(w) { return maskEnglish(w.meaning); }
 
 // ---------------- Text-to-speech ----------------
 // Browser-native speechSynthesis — no network, works offline on iPad Safari. Drives word cards,
@@ -1461,12 +1463,12 @@ function QuizTab({ words, pW, history, pH, notify }) {
     const distract = shuffle(optPool.filter((p) => normAnswer(p) !== normAnswer(token))).slice(0, 3);
     setOptions(shuffle([token, ...distract]));
     setQuestion({ kind: "focus", focusKind, correct: token, before, after,
-      hint: cur.meaning, example: blankFocus(cur.example, token), note: note || cur.note || "" });
+      hint: maskEnglish(cur.meaning), example: blankFocus(cur.example, token), note: note || cur.note || "" });
   }
   function buildMcQ(cur) {
     const m = cur.mc;
     setOptions(shuffle(m.options.slice()));
-    setQuestion({ kind: "mc", correct: m.options[m.correct], prompt: m.prompt, explain: m.explain || "", hint: cur.meaning });
+    setQuestion({ kind: "mc", correct: m.options[m.correct], prompt: m.prompt, explain: m.explain || "", hint: maskEnglish(cur.meaning) });
   }
   function buildOrderQ(cur) {
     setOptions([]); setPlaced([]);
@@ -1803,7 +1805,7 @@ function QuizTab({ words, pW, history, pH, notify }) {
               return (
                 <button key={opt} onClick={() => submitChoice(opt)}
                   className="fb text-left px-5 py-4 text-base" style={style}>
-                  {opt}
+                  {question && question.kind === "meaning" ? maskEnglish(opt) : opt}
                 </button>
               );
             }) : (
