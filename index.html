@@ -579,6 +579,7 @@ function splitAround(phrase, token) {
 // The question specs a card supports. 重點混合 mode picks one at random per card each time it comes up.
 function cardSpecs(w) {
   const t = w.qtype;
+  if (t === "order") return (w.answer && String(w.answer).trim().split(/\s+/).length >= 2) ? [{ kind: "order" }] : [{ kind: "meaning" }];
   if (t === "mc") return (w.mc && Array.isArray(w.mc.options) && w.mc.options.length >= 2) ? [{ kind: "mc" }] : [{ kind: "meaning" }];
   if (t === "prep" || t === "colloc") {
     const foci = Array.isArray(w.focus) && w.focus.length ? w.focus : ["target"];
@@ -1419,6 +1420,7 @@ function QuizTab({ words, pW, history, pH, notify }) {
   const [results, setResults] = useState([]);
   const [options, setOptions] = useState([]);
   const [question, setQuestion] = useState(null); // choice-mode question descriptor: meaning vs focus (prep/verb)
+  const [placed, setPlaced] = useState([]); // word-order mode: token ids placed into the answer row, in order
 
   const todayEntry = history.find((h) => h.date === todayISO());
   const narrow = useNarrow();
@@ -1441,10 +1443,17 @@ function QuizTab({ words, pW, history, pH, notify }) {
       if (!cz.length) { notify("還沒有可出克漏字的字:需要含該單字的例句"); return; }
       pool = cz;
     }
+    if (mode === "order") {
+      const isOrd = (w) => cardSpecs(w).some((s) => s.kind === "order");
+      let od = pool.filter(isOrd);
+      if (!od.length) od = active.filter(isOrd);
+      if (!od.length) { notify("還沒有語序題卡:需要排列句子類型(qtype order)的卡"); return; }
+      pool = od;
+    }
     const weighted = pool.map((w) => ({ w, wt: (w.wrong || 0) * 2 - (w.correct || 0) + 1 }));
     const sorted = shuffle(weighted).sort((a, b) => b.wt - a.wt);
     const chosen = sorted.slice(0, Math.min(count, pool.length)).map((x) => x.w);
-    setQueue(shuffle(chosen)); setIdx(0); setResults([]); setAnswered(null); setTyped("");
+    setQueue(shuffle(chosen)); setIdx(0); setResults([]); setAnswered(null); setTyped(""); setPlaced([]); setQuestion(null);
     setPhase("running");
   }
 
@@ -1468,14 +1477,20 @@ function QuizTab({ words, pW, history, pH, notify }) {
     setOptions(shuffle(m.options.slice()));
     setQuestion({ kind: "mc", correct: m.options[m.correct], prompt: m.prompt, explain: m.explain || "", hint: cur.meaning });
   }
-  // One question per card: 選擇題 drills meaning only; 重點混合 picks one of the card's declared 考點.
+  function buildOrderQ(cur) {
+    setOptions([]); setPlaced([]);
+    setQuestion({ kind: "order", answer: cur.answer, translation: cur.translation || cur.meaning || "", note: cur.note || "" });
+  }
+  // One question per card: 選擇題 drills meaning only; 語序 drills word order; 重點混合 picks one 考點.
   useEffect(() => {
-    if (phase !== "running" || !(mode === "choice" || mode === "mix") || !queue[idx]) return;
+    if (phase !== "running" || !queue[idx] || !(mode === "choice" || mode === "mix" || mode === "order")) return;
     const cur = queue[idx];
+    if (mode === "order") { buildOrderQ(cur); return; }
     if (mode === "choice") { buildMeaningQ(cur); return; }
     const specs = cardSpecs(cur);
     const spec = specs[Math.floor(Math.random() * specs.length)];
     if (spec.kind === "mc") buildMcQ(cur);
+    else if (spec.kind === "order") buildOrderQ(cur);
     else if (spec.kind === "target") buildTokenQ(cur, cur.target, cur.qtype === "prep" ? "prep" : "verb",
       cur.qtype === "prep" ? PREP_OPTS : (Array.isArray(cur.options) && cur.options.length ? cur.options : VERB_OPTS));
     else if (spec.kind === "legacyFocus") buildTokenQ(cur, spec.fw.token, spec.fw.kind,
@@ -1513,9 +1528,17 @@ function QuizTab({ words, pW, history, pH, notify }) {
     setAnswered({ ok, chosen: typed });
     setResults((r) => [...r, { id: queue[idx].id, ok }]);
   }
+  function submitOrder() {
+    if (answered || !question || question.kind !== "order" || !placed.length) return;
+    const toks = orderTokens(question.answer);
+    const built = placed.map((id) => (toks.find((t) => t.id === id) || {}).tok).join(" ");
+    const ok = sameSentence(built, question.answer);
+    setAnswered({ ok, chosen: built });
+    setResults((r) => [...r, { id: queue[idx].id, ok }]);
+  }
   function next() {
     if (idx + 1 >= queue.length) finish();
-    else { setIdx((i) => i + 1); setAnswered(null); setTyped(""); }
+    else { setIdx((i) => i + 1); setAnswered(null); setTyped(""); setPlaced([]); setQuestion(null); }
   }
   async function finish() {
     const nw = words.map((w) => {
@@ -1601,6 +1624,11 @@ function QuizTab({ words, pW, history, pH, notify }) {
               style={{ padding: "10px 18px", fontSize: 13 }}>
               克漏字 · 看例句填空
             </button>
+            <button onClick={() => setMode("order")}
+              className={`pill ${mode === "order" ? "pill-solid" : "pill-line"} justify-start`}
+              style={{ padding: "10px 18px", fontSize: 13 }}>
+              語序 · 排列句子
+            </button>
           </div>
         </Cell>
 
@@ -1622,7 +1650,10 @@ function QuizTab({ words, pW, history, pH, notify }) {
 
   if (phase === "running") {
     const w = queue[idx];
-    const isChoiceLike = mode === "choice" || mode === "mix"; // both drive the MC layout via `question`
+    const isOrderQ = !!(question && question.kind === "order"); // word-order card: tile interaction, not MC/typed
+    const isChoiceLike = !isOrderQ && (mode === "choice" || mode === "mix"); // both drive the MC layout via `question`
+    const orderToks = isOrderQ ? orderTokens(question.answer) : [];
+    const placedSet = new Set(placed);
     return (
       <div key="running" className="view-enter grid" style={{ gridTemplateColumns: narrow ? "minmax(0, 1fr)" : "minmax(0, 1.1fr) minmax(0, 1fr)", minHeight: "100%" }}>
         {/* Left: prompt */}
@@ -1636,7 +1667,31 @@ function QuizTab({ words, pW, history, pH, notify }) {
             </div>
           </div>
           <div className={`flex-1 flex flex-col items-start justify-center ${narrow ? "px-5 py-6" : "px-8 py-8"}`}>
-            {isChoiceLike ? (
+            {isOrderQ ? (
+              <div className="flex flex-col items-start gap-3 w-full">
+                <span className="pill pill-line">點字卡排出正確語序</span>
+                {question.translation && <div className="fb text-base" style={{ color: "#555" }}>{question.translation}</div>}
+                <div className="flex flex-wrap gap-2 px-3 py-3 w-full" style={{ border: `1px solid ${INK}`, minHeight: 56 }}>
+                  {placed.length === 0 && <span className="fb text-xs" style={{ color: "#aaa" }}>從右邊點字卡排到這裡…</span>}
+                  {placed.map((id) => {
+                    const t = orderToks.find((x) => x.id === id);
+                    return (
+                      <button key={id} disabled={!!answered} onClick={() => setPlaced(placed.filter((x) => x !== id))}
+                        className="fh text-base px-3 py-1.5" style={{ border: `1px solid ${INK}`, background: INK, color: PAPER }}>{t ? t.tok : ""}</button>
+                    );
+                  })}
+                </div>
+                {answered && (
+                  <div className="pop-in">
+                    <span className={`pill ${answered.ok ? "pill-green" : "pill-solid"}`} style={{ padding: "8px 18px", fontSize: 13 }}>
+                      {answered.ok ? <><Ico name="check" size={13} /> Correct 答對</> : <><Ico name="cross" size={13} /> Wrong 答錯</>}
+                    </span>
+                    <div className="fb text-sm mt-3">正確語序:<span className="fh font-bold" style={{ color: INK }}> {question.answer}</span></div>
+                    {question.note && <div className="fb text-sm mt-2" style={{ color: "#555" }}>{question.note}</div>}
+                  </div>
+                )}
+              </div>
+            ) : isChoiceLike ? (
               question && question.kind === "focus" ? (
                 <div className="flex flex-col items-start gap-3">
                   <div className="fh flex items-center flex-wrap gap-x-3 gap-y-1" style={{ fontWeight: 800, fontSize: "clamp(26px,4vw,46px)", lineHeight: 1.1 }}>
@@ -1695,7 +1750,7 @@ function QuizTab({ words, pW, history, pH, notify }) {
                 <span className="pill pill-line mt-4">Spell it 拼出單字</span>
               </>
             )}
-            {answered && (
+            {answered && !isOrderQ && (
               <div className="pop-in mt-6">
                 <span className={`pill ${answered.ok ? "pill-green" : "pill-solid"}`} style={{ padding: "8px 18px", fontSize: 13 }}>
                   {answered.ok ? <><Ico name="check" size={13} /> Correct 答對</> : <><Ico name="cross" size={13} /> Wrong 答錯</>}
@@ -1726,10 +1781,26 @@ function QuizTab({ words, pW, history, pH, notify }) {
         {/* Right: answers */}
         <div className="flex flex-col">
           <div className="hair-b px-4 py-2.5">
-            <span className="pill pill-solid">{isChoiceLike ? (question && (question.kind === "focus" || question.kind === "mc") ? "Choose 選出正確的" : "Choose 選出意思") : mode === "listen" ? "Type 聽音拼寫" : mode === "cloze" ? "Type 填入空格" : "Type 輸入拼寫"}</span>
+            <span className="pill pill-solid">{isOrderQ ? "Tap 點字卡排語序" : isChoiceLike ? (question && (question.kind === "focus" || question.kind === "mc") ? "Choose 選出正確的" : "Choose 選出意思") : mode === "listen" ? "Type 聽音拼寫" : mode === "cloze" ? "Type 填入空格" : "Type 輸入拼寫"}</span>
           </div>
           <div className="flex-1 flex flex-col justify-center px-6 py-6 gap-3">
-            {isChoiceLike ? options.map((opt) => {
+            {isOrderQ ? (
+              <>
+                <div className="flex flex-wrap gap-2">
+                  {orderToks.filter((t) => !placedSet.has(t.id)).map((t) => (
+                    <button key={t.id} disabled={!!answered} onClick={() => setPlaced([...placed, t.id])}
+                      className="fh text-base px-3 py-1.5" style={{ border: `1px solid ${INK}`, background: "transparent", color: INK }}>{t.tok}</button>
+                  ))}
+                </div>
+                {!answered && (
+                  <button onClick={submitOrder} disabled={!placed.length}
+                    className="btn-ghost px-6 py-3 text-sm self-start disabled:opacity-30">Check 確認</button>
+                )}
+                {!answered && placed.length > 0 && (
+                  <button onClick={() => setPlaced([])} className="fb text-xs underline self-start" style={{ color: "#888" }}>清空</button>
+                )}
+              </>
+            ) : isChoiceLike ? options.map((opt) => {
               const isChosen = answered && answered.chosen === opt;
               const isRight = answered && opt === (question ? question.correct : w.meaning);
               let style = { border: `1px solid ${INK}`, background: "transparent" };
