@@ -1766,6 +1766,9 @@ function QuizTab({ words, pW, history, pH, notify }) {
                 {question && question.kind === "mc" && question.explain && (
                   <div className="fb text-sm mt-2" style={{ color: "#555" }}>{question.explain}</div>
                 )}
+                {question && question.kind === "meaning" && w.note && (
+                  <div className="fb text-sm mt-2" style={{ color: "#555" }}>{w.note}</div>
+                )}
               </div>
             )}
           </div>
