@@ -558,6 +558,86 @@ function blankFocus(text, token) {
   const re = new RegExp("\\b" + token.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "\\b", "i");
   return re.test(text) ? text.replace(re, "＿＿＿") : null;
 }
+
+// ---------------- Typed knowledge cards ----------------
+// A card can now DECLARE what it tests (its 考點) instead of the quiz guessing from the word string.
+// qtype: "meaning" (just the meaning) | "prep" (blank a preposition) | "colloc" (blank a collocation
+// word) | "mc" (a self-contained multiple-choice the author wrote). prep/colloc carry a `target`
+// token to blank, an optional `options` override, an optional `note` shown after answering, and a
+// `focus` array that may add "meaning" (複選: sometimes test the prep, sometimes the meaning). Cards
+// with NO qtype are legacy — fall back to the old wordFocus() heuristic so everything built before
+// this upgrade behaves exactly as before.
+const CARD_TYPES = [["meaning", "意思"], ["prep", "介系詞"], ["colloc", "搭配詞"], ["mc", "選擇題"]];
+function cardTypeLabel(t) { const f = CARD_TYPES.find((x) => x[0] === t); return f ? f[1] : null; }
+// Where the target token sits inside `phrase`, so the quiz can blank it and show before/after.
+function splitAround(phrase, token) {
+  if (!phrase || !token) return { before: String(phrase || ""), after: "" };
+  const m = String(phrase).match(new RegExp("\\b" + escRe(token) + "\\b", "i"));
+  if (!m) return { before: String(phrase), after: "" };
+  return { before: phrase.slice(0, m.index).trim(), after: phrase.slice(m.index + m[0].length).trim() };
+}
+// The question specs a card supports. 重點混合 mode picks one at random per card each time it comes up.
+function cardSpecs(w) {
+  const t = w.qtype;
+  if (t === "mc") return (w.mc && Array.isArray(w.mc.options) && w.mc.options.length >= 2) ? [{ kind: "mc" }] : [{ kind: "meaning" }];
+  if (t === "prep" || t === "colloc") {
+    const foci = Array.isArray(w.focus) && w.focus.length ? w.focus : ["target"];
+    const specs = [];
+    if (foci.includes("target") && w.target) specs.push({ kind: "target", qtype: t });
+    if (foci.includes("meaning")) specs.push({ kind: "meaning" });
+    return specs.length ? specs : [{ kind: "meaning" }];
+  }
+  if (t === "meaning") return [{ kind: "meaning" }];
+  // legacy (no declared type): reuse the old heuristic so pre-upgrade cards are unchanged
+  const fw = wordFocus(w.word);
+  if (fw && (fw.kind === "prep" || fw.kind === "verb")) return [{ kind: "legacyFocus", fw }, { kind: "meaning" }];
+  return [{ kind: "meaning" }];
+}
+// Authoring helpers shared by the add form (BankTab) and the edit panel (WordDetail).
+const TYPE_HINT = {
+  meaning: "考中文意思。例:past tense、A has got nothing on B(當片語意思考)",
+  prep: "考搭配的介系詞。標出要考的介系詞,可勾也考意思。例:apply to、impact on",
+  colloc: "考該用哪個字。標出考點字+候選字。例:make an offer(make/give)",
+  mc: "自己寫題幹+選項+解析,給不好歸類的用法。例:impact 動詞不加 on",
+};
+function blankCardForm(qtype) {
+  return { qtype: qtype || "meaning", word: "", meaning: "", example: "",
+    target: "", options: "", alsoMeaning: false, note: "",
+    mcPrompt: "", mcOptions: "", mcCorrect: 0, mcExplain: "" };
+}
+function cardToForm(w) {
+  const f = blankCardForm(w.qtype || "meaning");
+  f.word = w.word || ""; f.meaning = w.meaning || ""; f.example = w.example || "";
+  f.target = w.target || ""; f.note = w.note || "";
+  f.options = Array.isArray(w.options) ? w.options.join(", ") : "";
+  f.alsoMeaning = Array.isArray(w.focus) && w.focus.includes("meaning");
+  if (w.mc) { f.mcPrompt = w.mc.prompt || ""; f.mcOptions = (w.mc.options || []).join("\n"); f.mcCorrect = w.mc.correct || 0; f.mcExplain = w.mc.explain || ""; }
+  return f;
+}
+// Build the type-specific card fields from a form. Returns {patch} or {err}. Irrelevant fields are
+// nulled so switching a card's type clears stale data (cardSpecs treats null target/options/mc as absent).
+function cardFieldsFromForm(f) {
+  const q = f.qtype;
+  if (q === "mc") {
+    const opts = f.mcOptions.split("\n").map((s) => s.trim()).filter(Boolean);
+    if (!f.mcPrompt.trim() || opts.length < 2) return { err: "選擇題需要題幹與至少兩個選項" };
+    const correct = Math.min(Math.max(0, Number(f.mcCorrect) || 0), opts.length - 1);
+    return { patch: { qtype: "mc", mc: { prompt: f.mcPrompt.trim(), options: opts, correct, explain: f.mcExplain.trim() },
+      note: f.note.trim() || null, target: null, options: null, focus: null } };
+  }
+  if (q === "prep" || q === "colloc") {
+    const target = f.target.trim();
+    if (!target) return { err: q === "prep" ? "請標出要考的介系詞" : "請標出要考的字" };
+    const patch = { qtype: q, target: q === "prep" ? target.toLowerCase() : target,
+      focus: f.alsoMeaning ? ["target", "meaning"] : ["target"], note: f.note.trim() || null, mc: null };
+    patch.options = q === "colloc"
+      ? ((o) => (o.length ? o : null))(f.options.split(/[,，\n]/).map((s) => s.trim()).filter(Boolean))
+      : null;
+    return { patch };
+  }
+  return { patch: { qtype: "meaning", target: null, options: null, focus: null, mc: null, note: f.note.trim() || null } };
+}
+
 function nextWeekend() {
   const d = new Date(); const diff = (6 - d.getDay() + 7) % 7;
   d.setDate(d.getDate() + diff); return d.toISOString().slice(0, 10);
@@ -628,16 +708,39 @@ function setVoiceURI(u) { _voiceURI = u || null; }
 function enVoices() {
   try { return window.speechSynthesis.getVoices().filter((v) => /^en(-|_|$)/i.test(v.lang)); } catch { return []; }
 }
+// Rank English voices by naturalness. The OS "default" voice is usually the oldest,
+// most robotic one, so we auto-pick the best the device offers instead. Modern neural
+// voices: Microsoft "...Online (Natural)" (Edge on Windows), Google (Chrome/Android),
+// iOS "(Enhanced/Premium)" + Siri (downloadable in iOS Settings). Legacy robotic ones:
+// "Desktop"/"Compact"/eSpeak/pico.
+function voiceScore(v) {
+  const n = (v.name || "").toLowerCase();
+  const lang = (v.lang || "").toLowerCase();
+  let s = 0;
+  if (/natural|neural|online/.test(n)) s += 100;
+  if (/siri/.test(n)) s += 70;
+  if (/premium|enhanced/.test(n)) s += 60;
+  if (/\bgoogle\b/.test(n)) s += 50;
+  if (/\b(aria|jenny|guy|ava|emma|brian|libby|ryan|sonia|michelle|samantha|allison|serena|zoe|nova|evan|nathan|joelle)\b/.test(n)) s += 25;
+  if (/compact|desktop|e-?speak|espeak|pico|novelty/.test(n)) s -= 100;
+  if (/^en[-_]us/.test(lang)) s += 6; else if (/^en[-_]gb/.test(lang)) s += 3;
+  return s;
+}
+function rankedVoices() { return enVoices().slice().sort((a, b) => voiceScore(b) - voiceScore(a)); }
+function bestVoice() { const r = rankedVoices(); return r.length ? r[0] : null; }
+function isNaturalVoice(v) { return voiceScore(v) >= 50; }
 function speak(text) {
   if (!canSpeak || !text) return;
   try {
     window.speechSynthesis.cancel();
     const u = new SpeechSynthesisUtterance(String(text));
     u.lang = "en-US"; u.rate = 0.95;
-    if (_voiceURI) {
-      const v = window.speechSynthesis.getVoices().find((x) => x.voiceURI === _voiceURI);
-      if (v) { u.voice = v; u.lang = v.lang; }
-    }
+    // Explicit pick wins; otherwise auto-select the most natural voice the device offers
+    // (never fall through to the OS default, which is typically the most robotic one).
+    let v = null;
+    if (_voiceURI) v = window.speechSynthesis.getVoices().find((x) => x.voiceURI === _voiceURI);
+    if (!v) v = bestVoice();
+    if (v) { u.voice = v; u.lang = v.lang; }
     window.speechSynthesis.speak(u);
   } catch {}
 }
@@ -1182,7 +1285,7 @@ function TopBar({ tab, setTab, words, history, onStartWebinar }) {
     { key: "webinar", label: "Webinar 週報" },
     { key: "slides", label: "簡報自校" },
     { key: "quiz", label: "Daily Quiz 每日測驗" },
-    { key: "bank", label: "Word Bank 單字庫" },
+    { key: "bank", label: "Knowledge 知識庫" },
     { key: "errorbank", label: "Error Bank 錯題庫" },
     { key: "progress", label: "Progress 進度" },
   ];
@@ -1307,7 +1410,7 @@ function Cell({ tag, count, children, className = "", green }) {
 function QuizTab({ words, pW, history, pH, notify }) {
   const [phase, setPhase] = useState("setup");
   const [count, setCount] = useState(10);
-  const [mode, setMode] = useState("choice");
+  const [mode, setMode] = useState("mix"); // "mix" = 重點混合: test each card by its own 考點
   const [scope, setScope] = useState("due"); // "due" = only words due today | "all" = whole bank
   const [queue, setQueue] = useState([]);
   const [idx, setIdx] = useState(0);
@@ -1345,25 +1448,39 @@ function QuizTab({ words, pW, history, pH, notify }) {
     setPhase("running");
   }
 
-  // Choice mode builds one of two questions per word: test the teaching point (blank the preposition
-  // / collocation verb, pick from same-category options) when the word has one, else the old meaning
-  // MC. Focus-eligible words get the point ~60% of the time so meaning still shows up (mixed, per the
-  // user's "可以考意思也可以考介系詞"). Runs once per word (idx change), like the old options effect.
+  // Question builders for the choice-like modes. Each sets `options` + a `question` descriptor the
+  // running view and grader read. Kinds: "meaning" (pick the Chinese meaning), "focus" (blank a
+  // preposition / collocation word and pick the token), "mc" (an author-written multiple-choice).
+  function buildMeaningQ(cur) {
+    const pool = words.filter((w) => w.id !== cur.id && w.meaning && w.meaning !== cur.meaning);
+    setOptions(shuffle([cur.meaning, ...shuffle(pool).slice(0, 3).map((w) => w.meaning)]));
+    setQuestion({ kind: "meaning", correct: cur.meaning });
+  }
+  function buildTokenQ(cur, token, focusKind, optPool, note) {
+    const { before, after } = splitAround(cur.word, token);
+    const distract = shuffle(optPool.filter((p) => normAnswer(p) !== normAnswer(token))).slice(0, 3);
+    setOptions(shuffle([token, ...distract]));
+    setQuestion({ kind: "focus", focusKind, correct: token, before, after,
+      hint: cur.meaning, example: blankFocus(cur.example, token), note: note || cur.note || "" });
+  }
+  function buildMcQ(cur) {
+    const m = cur.mc;
+    setOptions(shuffle(m.options.slice()));
+    setQuestion({ kind: "mc", correct: m.options[m.correct], prompt: m.prompt, explain: m.explain || "", hint: cur.meaning });
+  }
+  // One question per card: 選擇題 drills meaning only; 重點混合 picks one of the card's declared 考點.
   useEffect(() => {
-    if (phase !== "running" || mode !== "choice" || !queue[idx]) return;
+    if (phase !== "running" || !(mode === "choice" || mode === "mix") || !queue[idx]) return;
     const cur = queue[idx];
-    const fw = wordFocus(cur.word);
-    if (fw && (fw.kind === "prep" || fw.kind === "verb") && Math.random() < 0.6) {
-      const pool = fw.kind === "prep" ? PREP_OPTS : VERB_OPTS;
-      const distract = shuffle(pool.filter((p) => p.toLowerCase() !== fw.token.toLowerCase())).slice(0, 3);
-      setOptions(shuffle([fw.token, ...distract]));
-      setQuestion({ kind: "focus", focusKind: fw.kind, correct: fw.token, before: fw.before, after: fw.after,
-        hint: cur.meaning, example: blankFocus(cur.example, fw.token) });
-    } else {
-      const pool = words.filter((w) => w.id !== cur.id);
-      setOptions(shuffle([cur.meaning, ...shuffle(pool).slice(0, 3).map((w) => w.meaning)]));
-      setQuestion({ kind: "meaning", correct: cur.meaning });
-    }
+    if (mode === "choice") { buildMeaningQ(cur); return; }
+    const specs = cardSpecs(cur);
+    const spec = specs[Math.floor(Math.random() * specs.length)];
+    if (spec.kind === "mc") buildMcQ(cur);
+    else if (spec.kind === "target") buildTokenQ(cur, cur.target, cur.qtype === "prep" ? "prep" : "verb",
+      cur.qtype === "prep" ? PREP_OPTS : (Array.isArray(cur.options) && cur.options.length ? cur.options : VERB_OPTS));
+    else if (spec.kind === "legacyFocus") buildTokenQ(cur, spec.fw.token, spec.fw.kind,
+      spec.fw.kind === "prep" ? PREP_OPTS : VERB_OPTS);
+    else buildMeaningQ(cur);
   }, [idx, phase, mode, queue, words]);
 
   // Auto-play the word when a listen/dictation question appears; the user can replay via the button.
@@ -1377,7 +1494,7 @@ function QuizTab({ words, pW, history, pH, notify }) {
   // window listener for the typed modes WOULD double-fire: React 18 flushes this effect synchronously
   // mid-keydown, adding the listener before the same Enter finishes bubbling to window.)
   useEffect(() => {
-    if (phase !== "running" || mode !== "choice" || !answered) return;
+    if (phase !== "running" || !(mode === "choice" || mode === "mix") || !answered) return;
     const onKey = (e) => { if (e.key === "Enter") { e.preventDefault(); next(); } };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
@@ -1385,7 +1502,8 @@ function QuizTab({ words, pW, history, pH, notify }) {
 
   function submitChoice(m) {
     if (answered) return;
-    const ok = m === (question ? question.correct : queue[idx].meaning);
+    const correct = question ? question.correct : queue[idx].meaning;
+    const ok = question && question.kind === "focus" ? normAnswer(m) === normAnswer(correct) : m === correct;
     setAnswered({ ok, chosen: m });
     setResults((r) => [...r, { id: queue[idx].id, ok }]);
   }
@@ -1456,10 +1574,15 @@ function QuizTab({ words, pW, history, pH, notify }) {
 
         <Cell tag="Mode" className="hair-b">
           <div className="flex flex-col gap-2">
+            <button onClick={() => setMode("mix")}
+              className={`pill ${mode === "mix" ? "pill-solid" : "pill-line"} justify-start`}
+              style={{ padding: "10px 18px", fontSize: 13 }}>
+              重點混合 · 依卡片考點出題
+            </button>
             <button onClick={() => setMode("choice")}
               className={`pill ${mode === "choice" ? "pill-solid" : "pill-line"} justify-start`}
               style={{ padding: "10px 18px", fontSize: 13 }}>
-              選擇題 · 看字選意思
+              選擇題 · 只考意思
             </button>
             <button onClick={() => setMode("type")}
               className={`pill ${mode === "type" ? "pill-solid" : "pill-line"} justify-start`}
@@ -1490,7 +1613,7 @@ function QuizTab({ words, pW, history, pH, notify }) {
         </div>
         {words.length < 2 && (
           <div className={`${narrow ? "" : "col-span-3 "}fb text-center text-sm pb-8`} style={{ color: "#777" }}>
-            先到 Word Bank 新增至少 2 個單字
+            先到「知識庫」新增至少 2 張卡
           </div>
         )}
       </div>
@@ -1499,6 +1622,7 @@ function QuizTab({ words, pW, history, pH, notify }) {
 
   if (phase === "running") {
     const w = queue[idx];
+    const isChoiceLike = mode === "choice" || mode === "mix"; // both drive the MC layout via `question`
     return (
       <div key="running" className="view-enter grid" style={{ gridTemplateColumns: narrow ? "minmax(0, 1fr)" : "minmax(0, 1.1fr) minmax(0, 1fr)", minHeight: "100%" }}>
         {/* Left: prompt */}
@@ -1512,7 +1636,7 @@ function QuizTab({ words, pW, history, pH, notify }) {
             </div>
           </div>
           <div className={`flex-1 flex flex-col items-start justify-center ${narrow ? "px-5 py-6" : "px-8 py-8"}`}>
-            {mode === "choice" ? (
+            {isChoiceLike ? (
               question && question.kind === "focus" ? (
                 <div className="flex flex-col items-start gap-3">
                   <div className="fh flex items-center flex-wrap gap-x-3 gap-y-1" style={{ fontWeight: 800, fontSize: "clamp(26px,4vw,46px)", lineHeight: 1.1 }}>
@@ -1525,6 +1649,16 @@ function QuizTab({ words, pW, history, pH, notify }) {
                     {question.hint && <span className="fb text-sm" style={{ color: "#777" }}>{question.hint}</span>}
                   </div>
                   {question.example && <div className="fb text-sm italic" style={{ color: "#9a9a92" }}>{question.example}</div>}
+                </div>
+              ) : question && question.kind === "mc" ? (
+                <div className="flex flex-col items-start gap-3">
+                  <div className="fh" style={{ fontWeight: 800, fontSize: "clamp(22px,3.4vw,40px)", lineHeight: 1.2 }}>
+                    {question.prompt}
+                  </div>
+                  <div className="flex items-center gap-2 mt-1">
+                    <span className="pill pill-line">選出正確用法</span>
+                    {question.hint && <span className="fb text-sm" style={{ color: "#777" }}>{question.hint}</span>}
+                  </div>
                 </div>
               ) : (
                 <div className="fh flex items-center gap-3" style={{ fontWeight: 800, fontSize: "clamp(32px,5vw,56px)", lineHeight: 1 }}>
@@ -1566,14 +1700,24 @@ function QuizTab({ words, pW, history, pH, notify }) {
                 <span className={`pill ${answered.ok ? "pill-green" : "pill-solid"}`} style={{ padding: "8px 18px", fontSize: 13 }}>
                   {answered.ok ? <><Ico name="check" size={13} /> Correct 答對</> : <><Ico name="cross" size={13} /> Wrong 答錯</>}
                 </span>
-                {(mode !== "choice" || (question && question.kind === "focus")) && (
+                {(!isChoiceLike || (question && question.kind === "focus")) && (
                   <div className="fb mt-3 text-sm flex items-center gap-2">
                     {question && question.kind === "focus" ? "完整用法:" : (answered.ok ? "單字:" : "正確答案:")}
                     <span className="fh font-bold text-lg">{w.word}</span>
                     <Speaker text={w.word} />
                   </div>
                 )}
+                {question && question.kind === "mc" && !answered.ok && (
+                  <div className="fb mt-3 text-sm flex items-center gap-2">正確答案:
+                    <span className="fh font-bold text-lg">{question.correct}</span></div>
+                )}
                 {w.example && <div className="fb text-sm mt-3 italic" style={{ color: "#555" }}>{w.example}</div>}
+                {question && question.kind === "focus" && question.note && (
+                  <div className="fb text-sm mt-2" style={{ color: "#555" }}>{question.note}</div>
+                )}
+                {question && question.kind === "mc" && question.explain && (
+                  <div className="fb text-sm mt-2" style={{ color: "#555" }}>{question.explain}</div>
+                )}
               </div>
             )}
           </div>
@@ -1582,10 +1726,10 @@ function QuizTab({ words, pW, history, pH, notify }) {
         {/* Right: answers */}
         <div className="flex flex-col">
           <div className="hair-b px-4 py-2.5">
-            <span className="pill pill-solid">{mode === "choice" ? (question && question.kind === "focus" ? "Choose 選出正確的字" : "Choose 選出意思") : mode === "listen" ? "Type 聽音拼寫" : mode === "cloze" ? "Type 填入空格" : "Type 輸入拼寫"}</span>
+            <span className="pill pill-solid">{isChoiceLike ? (question && (question.kind === "focus" || question.kind === "mc") ? "Choose 選出正確的" : "Choose 選出意思") : mode === "listen" ? "Type 聽音拼寫" : mode === "cloze" ? "Type 填入空格" : "Type 輸入拼寫"}</span>
           </div>
           <div className="flex-1 flex flex-col justify-center px-6 py-6 gap-3">
-            {mode === "choice" ? options.map((opt) => {
+            {isChoiceLike ? options.map((opt) => {
               const isChosen = answered && answered.chosen === opt;
               const isRight = answered && opt === (question ? question.correct : w.meaning);
               let style = { border: `1px solid ${INK}`, background: "transparent" };
@@ -1691,11 +1835,80 @@ function QuizTab({ words, pW, history, pH, notify }) {
   );
 }
 
+// Type picker + adaptive fields for authoring a knowledge card. Shared by the 新增 cell (BankTab)
+// and the 編輯考點 panel (WordDetail). `ns` namespaces the MC radio group so two instances don't clash.
+function CardFormFields({ form, setForm, ns }) {
+  const set = (patch) => setForm({ ...form, ...patch });
+  const inp = { border: `1px solid ${INK}`, background: "transparent" };
+  const mcOpts = form.mcOptions.split("\n").map((s) => s.trim()).filter(Boolean);
+  const isPrep = form.qtype === "prep", isColloc = form.qtype === "colloc", isMc = form.qtype === "mc";
+  return (
+    <div className="flex flex-col gap-2">
+      <div className="flex gap-1.5 flex-wrap">
+        {CARD_TYPES.map(([key, zh]) => (
+          <button key={key} onClick={() => set({ qtype: key })}
+            className={`pill ${form.qtype === key ? "pill-solid" : "pill-line"}`}
+            style={{ fontSize: 11, padding: "3px 10px" }}>{zh}</button>
+        ))}
+      </div>
+      <div className="fb text-xs" style={{ color: "#888" }}>{TYPE_HINT[form.qtype]}</div>
+      <input value={form.word} onChange={(e) => set({ word: e.target.value })}
+        placeholder={isMc ? "卡片標題 如 impact(動詞/名詞)" : "word 單字/片語"} className="px-3 py-2.5 text-sm" style={inp} />
+      <input value={form.meaning} onChange={(e) => set({ meaning: e.target.value })}
+        placeholder={isMc ? "意思(選填)" : "meaning 意思"} className="px-3 py-2.5 text-sm" style={inp} />
+      {isMc ? (
+        <>
+          <textarea value={form.mcPrompt} onChange={(e) => set({ mcPrompt: e.target.value })} rows={2}
+            placeholder="題幹,用 ＿＿＿ 當空格  如 This will ＿＿＿ our plan." className="w-full px-3 py-2.5 text-sm resize-none" style={inp} />
+          <textarea value={form.mcOptions} onChange={(e) => set({ mcOptions: e.target.value })} rows={3}
+            placeholder={"選項,每行一個\nimpact\nimpact on"} className="w-full px-3 py-2.5 text-sm resize-none" style={inp} />
+          {mcOpts.length >= 2 && (
+            <div className="flex flex-col gap-1">
+              <div className="fb text-xs" style={{ color: "#888" }}>點選正確答案</div>
+              {mcOpts.map((o, i) => (
+                <label key={i} className="flex items-center gap-2 fb text-sm" style={{ cursor: "pointer" }}>
+                  <input type="radio" name={`mccorrect-${ns || "x"}`} checked={Number(form.mcCorrect) === i} onChange={() => set({ mcCorrect: i })} />
+                  <span>{o}</span>
+                </label>
+              ))}
+            </div>
+          )}
+          <input value={form.mcExplain} onChange={(e) => set({ mcExplain: e.target.value })}
+            placeholder="解析(選填) 如 動詞不加 on" className="px-3 py-2.5 text-sm" style={inp} />
+        </>
+      ) : (
+        <>
+          <input value={form.example} onChange={(e) => set({ example: e.target.value })}
+            placeholder="example 例句(選填)" className="px-3 py-2.5 text-sm" style={inp} />
+          {(isPrep || isColloc) && (
+            <input value={form.target} onChange={(e) => set({ target: e.target.value })}
+              placeholder={isPrep ? "考點:要考的介系詞 如 to" : "考點:要考的字 如 make"} className="px-3 py-2.5 text-sm" style={inp} />
+          )}
+          {isColloc && (
+            <input value={form.options} onChange={(e) => set({ options: e.target.value })}
+              placeholder="候選字,逗號分隔 如 make, give, do" className="px-3 py-2.5 text-sm" style={inp} />
+          )}
+          {(isPrep || isColloc) && (
+            <label className="flex items-center gap-2 fb text-sm" style={{ cursor: "pointer" }}>
+              <input type="checkbox" checked={!!form.alsoMeaning} onChange={(e) => set({ alsoMeaning: e.target.checked })} />
+              <span>也考意思(複選)</span>
+            </label>
+          )}
+          {(isPrep || isColloc) && (
+            <input value={form.note} onChange={(e) => set({ note: e.target.value })}
+              placeholder="提示/解析(選填) 如 當名詞才加 on" className="px-3 py-2.5 text-sm" style={inp} />
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
 // ---------------- Bank Tab ----------------
 function BankTab({ words, pW, notify }) {
   const narrow = useNarrow();
   const [query, setQuery] = useState("");
-  const [form, setForm] = useState({ word: "", meaning: "", example: "" });
+  const [form, setForm] = useState(blankCardForm("meaning"));
   const [bulk, setBulk] = useState("");
   const [sel, setSel] = useState(null); // id of the word whose detail sheet is open
   const [filterMode, setFilterMode] = useState("all"); // all|due|learning|mastered|leech|suspended
@@ -1737,12 +1950,19 @@ function BankTab({ words, pW, notify }) {
   // when the skill later syncs the same word — otherwise it'd become a duplicate card. Adding also
   // clears any tombstone, so re-adding a word you previously deleted actually sticks.
   function addOne() {
-    if (!form.word.trim() || !form.meaning.trim()) { notify("請輸入單字與意思"); return; }
-    const id = vocabId(form.word);
-    if (words.some((w) => w.id === id)) { notify("這個單字已經在庫裡了"); return; }
-    pW([{ id, word: form.word.trim(), meaning: form.meaning.trim(), example: form.example.trim(), correct: 0, wrong: 0, addedAt: todayISO(), box: 1, due: todayISO() }, ...words]);
+    const fr = cardFieldsFromForm(form);
+    if (fr.err) { notify(fr.err); return; }
+    const isMc = form.qtype === "mc";
+    const word = form.word.trim() || (isMc ? form.mcPrompt.trim() : "");
+    if (!word) { notify("請輸入單字/標題"); return; }
+    if (!isMc && !form.meaning.trim()) { notify("請輸入意思"); return; }
+    const id = vocabId(word);
+    if (words.some((w) => w.id === id)) { notify("這張卡已經在庫裡了"); return; }
+    const base = { id, word, meaning: form.meaning.trim(), example: form.example.trim(),
+      correct: 0, wrong: 0, addedAt: todayISO(), box: 1, due: todayISO() };
+    pW([{ ...base, ...fr.patch }, ...words]);
     clearTombstones([id]);
-    setForm({ word: "", meaning: "", example: "" });
+    setForm(blankCardForm(form.qtype));
     notify("已新增");
   }
   function addBulk() {
@@ -1789,15 +2009,8 @@ function BankTab({ words, pW, notify }) {
       {/* Left column: add */}
       <div className={`${narrow ? "hair-b" : "hair-r"} flex flex-col`}>
         <Cell tag="Add 新增" className="hair-b">
-          <div className="flex flex-col gap-2">
-            <input value={form.word} onChange={(e) => setForm({ ...form, word: e.target.value })}
-              placeholder="word 單字" className="px-3 py-2.5 text-sm" style={{ border: `1px solid ${INK}`, background: "transparent" }} />
-            <input value={form.meaning} onChange={(e) => setForm({ ...form, meaning: e.target.value })}
-              placeholder="meaning 意思" className="px-3 py-2.5 text-sm" style={{ border: `1px solid ${INK}`, background: "transparent" }} />
-            <input value={form.example} onChange={(e) => setForm({ ...form, example: e.target.value })}
-              placeholder="example 例句(選填)" className="px-3 py-2.5 text-sm" style={{ border: `1px solid ${INK}`, background: "transparent" }} />
-            <button onClick={addOne} className="btn-ink px-4 py-3 text-sm mt-1">+ Add 加入</button>
-          </div>
+          <CardFormFields form={form} setForm={setForm} ns="add" />
+          <button onClick={addOne} className="btn-ink px-4 py-3 text-sm mt-2 w-full">+ Add 加入</button>
         </Cell>
         <Cell tag="Bulk 批次匯入" className="hair-b">
           <div className="fb text-xs mb-2" style={{ color: "#666" }}>每行:單字, 意思, 例句(選填)</div>
@@ -1827,7 +2040,7 @@ function BankTab({ words, pW, notify }) {
       {/* Right column: list */}
       <div className="flex flex-col">
         <div className="hair-b flex items-center gap-3 px-4 py-2.5">
-          <span className="pill pill-solid">Bank 單字庫</span>
+          <span className="pill pill-solid">Bank 知識庫</span>
           <span className="pill pill-line">{filtered.length}{filtered.length !== words.length ? ` / ${words.length}` : ""}</span>
           <input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="search 搜尋"
             className="flex-1 px-3 py-1.5 text-sm" style={{ border: `1px solid ${INK}`, background: "transparent", maxWidth: 280 }} />
@@ -1862,6 +2075,11 @@ function BankTab({ words, pW, notify }) {
                   <div className="fb text-sm mt-0.5">{w.meaning}</div>
                   {w.example && <div className="fb text-xs mt-1 italic" style={{ color: "#666" }}>{w.example}</div>}
                   <div className="flex gap-2 mt-2 flex-wrap items-center">
+                    {cardTypeLabel(w.qtype) && (
+                      <span className="pill pill-line" style={{ fontSize: 10, padding: "1px 8px" }}>
+                        考 {cardTypeLabel(w.qtype)}{Array.isArray(w.focus) && w.focus.includes("meaning") ? "+意思" : ""}
+                      </span>
+                    )}
                     <span className="pill pill-line" style={{ fontSize: 10, padding: "1px 8px" }}><Ico name="check" size={11} /> {w.correct || 0}</span>
                     <span className="pill pill-line" style={{ fontSize: 10, padding: "1px 8px" }}><Ico name="cross" size={11} /> {w.wrong || 0}</span>
                     {w.suspended
@@ -1882,6 +2100,7 @@ function BankTab({ words, pW, notify }) {
       </div>
       {selWord && (
         <WordDetail w={selWord} onClose={() => setSel(null)}
+          onEdit={(patch) => patchWord(selWord.id, patch)}
           onSuspend={() => patchWord(selWord.id, { suspended: !selWord.suspended })}
           onReset={() => { if (window.confirm(`把「${selWord.word}」的測驗進度歸零(對錯次數、box、到期日重置)?`)) patchWord(selWord.id, { correct: 0, wrong: 0, box: 1, due: todayISO(), suspended: false }); }}
           onDelete={() => remove(selWord)} />
@@ -1892,9 +2111,12 @@ function BankTab({ words, pW, notify }) {
 
 // Per-word detail sheet: full stats + the SRS actions that don't fit on a card. "Suspend" parks a
 // word out of every quiz pool (for a leech being drilled by hand); "reset" sends it back to box 1.
-function WordDetail({ w, onClose, onSuspend, onReset, onDelete }) {
+function WordDetail({ w, onClose, onEdit, onSuspend, onReset, onDelete }) {
   const leech = isLeech(w);
   const mastered = (w.box || 1) >= MASTER_BOX;
+  const [editing, setEditing] = useState(false);
+  const [ef, setEf] = useState(() => cardToForm(w));
+  const alsoMeaning = Array.isArray(w.focus) && w.focus.includes("meaning");
   const rows = [
     ["Leitner box", `${w.box || 1} / ${MASTER_BOX}${mastered ? "(已掌握)" : ""}`],
     ["下次複習", w.suspended ? "已暫停" : fmtDate(w.due || todayISO())],
@@ -1902,41 +2124,76 @@ function WordDetail({ w, onClose, onSuspend, onReset, onDelete }) {
     ["加入日期", w.addedAt ? fmtDate(w.addedAt) : "—"],
     ["來源場次", w.source || "手動新增"],
   ];
+  function saveEdit() {
+    const fr = cardFieldsFromForm(ef);
+    if (fr.err) { window.alert(fr.err); return; }
+    onEdit({ word: ef.word.trim() || w.word, meaning: ef.meaning.trim(), example: ef.example.trim(), ...fr.patch });
+    setEditing(false);
+  }
   return (
     <div className="paper overlay-enter fixed inset-0 z-50 flex items-center justify-center px-6" style={{ color: INK, background: "rgba(10,10,10,.35)" }}>
-      <div className="paper" style={{ width: "100%", maxWidth: 460, border: `2px solid ${INK}` }}>
+      <div className="paper" style={{ width: "100%", maxWidth: 460, maxHeight: "90vh", overflowY: "auto", border: `2px solid ${INK}` }}>
         <div className="hair-b flex items-center justify-between px-5 py-3">
           <div className="flex items-center gap-2 flex-wrap">
             <span className="fh font-bold" style={{ fontSize: 22 }}>{w.word}</span>
             <Speaker text={w.word} size={18} />
+            {cardTypeLabel(w.qtype) && <span className="pill pill-line" style={{ fontSize: 10 }}>考 {cardTypeLabel(w.qtype)}{alsoMeaning ? "+意思" : ""}</span>}
             {mastered && <span className="pill pill-green" style={{ fontSize: 10 }}><Ico name="star" size={11} /> 已掌握</span>}
             {leech && !w.suspended && <span className="pill pill-red" style={{ fontSize: 10 }}><Ico name="bug" size={11} /> 頑固字</span>}
             {w.suspended && <span className="pill pill-line" style={{ fontSize: 10, color: "#888" }}><Ico name="pause" size={11} /> 已暫停</span>}
           </div>
           <button onClick={onClose} className="btn-ink px-4 py-1.5 text-xs">Close 關閉</button>
         </div>
-        <div className="px-5 py-4">
-          <div className="fb text-base">{w.meaning}</div>
-          {w.example && <div className="fb text-sm mt-1 italic" style={{ color: "#666" }}>{w.example}</div>}
-          {leech && !w.suspended && (
-            <div className="fb text-xs mt-3 px-3 py-2" style={{ color: RED, border: `1px solid ${RED}` }}>
-              這個字一直答錯又沒晉級 — 建議單獨重背,或先「暫停」讓它不再每天出現。
+        {editing ? (
+          <div className="px-5 py-4">
+            <CardFormFields form={ef} setForm={setEf} ns="edit" />
+            <div className="flex items-center gap-2 mt-3">
+              <button onClick={saveEdit} className="btn-ink px-5 py-2.5 text-sm">儲存考點</button>
+              <button onClick={() => setEditing(false)} className="btn-ghost px-4 py-2.5 text-sm">取消</button>
             </div>
-          )}
-          <div className="flex flex-col divide-y mt-4" style={{ borderColor: "#d5d5cf" }}>
-            {rows.map(([k, v]) => (
-              <div key={k} className="py-2 flex items-center justify-between gap-3">
-                <span className="fb text-sm" style={{ color: "#777" }}>{k}</span>
-                <span className="fh font-bold text-sm" style={{ textAlign: "right" }}>{v}</span>
-              </div>
-            ))}
           </div>
-        </div>
-        <div className="hair-t flex items-center gap-2 px-5 py-3 flex-wrap">
-          <button onClick={onSuspend} className="btn-ghost px-4 py-2 text-sm">{w.suspended ? <><Ico name="play" size={13} /> 恢復排程</> : <><Ico name="pause" size={13} /> 暫停出題</>}</button>
-          <button onClick={onReset} className="btn-ghost px-4 py-2 text-sm"><Ico name="reset" size={13} /> 進度歸零</button>
-          <button onClick={onDelete} className="fb text-xs underline" style={{ color: "#888", marginLeft: "auto" }}>刪除單字</button>
-        </div>
+        ) : (
+          <>
+            <div className="px-5 py-4">
+              <div className="fb text-base">{w.meaning}</div>
+              {w.example && <div className="fb text-sm mt-1 italic" style={{ color: "#666" }}>{w.example}</div>}
+              {(w.qtype === "prep" || w.qtype === "colloc") && w.target && (
+                <div className="fb text-sm mt-3" style={{ color: "#555" }}>
+                  考點字:<span className="fh font-bold" style={{ color: INK }}> {w.target}</span>
+                  {Array.isArray(w.options) && w.options.length > 0 && <span style={{ color: "#888" }}>　候選: {w.options.join(" / ")}</span>}
+                </div>
+              )}
+              {w.qtype === "mc" && w.mc && (
+                <div className="fb text-sm mt-3" style={{ color: "#555" }}>
+                  <div className="fh" style={{ color: INK }}>{w.mc.prompt}</div>
+                  <div className="mt-1">{(w.mc.options || []).map((o, i) => (
+                    <span key={i} style={{ color: i === w.mc.correct ? INK : "#999", fontWeight: i === w.mc.correct ? 700 : 400 }}>{i === w.mc.correct ? "✓ " : "・"}{o}　</span>
+                  ))}</div>
+                </div>
+              )}
+              {w.note && <div className="fb text-sm mt-2" style={{ color: "#555" }}>{w.note}</div>}
+              {leech && !w.suspended && (
+                <div className="fb text-xs mt-3 px-3 py-2" style={{ color: RED, border: `1px solid ${RED}` }}>
+                  這個字一直答錯又沒晉級 — 建議單獨重背,或先「暫停」讓它不再每天出現。
+                </div>
+              )}
+              <div className="flex flex-col divide-y mt-4" style={{ borderColor: "#d5d5cf" }}>
+                {rows.map(([k, v]) => (
+                  <div key={k} className="py-2 flex items-center justify-between gap-3">
+                    <span className="fb text-sm" style={{ color: "#777" }}>{k}</span>
+                    <span className="fh font-bold text-sm" style={{ textAlign: "right" }}>{v}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+            <div className="hair-t flex items-center gap-2 px-5 py-3 flex-wrap">
+              <button onClick={() => { setEf(cardToForm(w)); setEditing(true); }} className="btn-ghost px-4 py-2 text-sm"><Ico name="pencil" size={13} /> 編輯考點</button>
+              <button onClick={onSuspend} className="btn-ghost px-4 py-2 text-sm">{w.suspended ? <><Ico name="play" size={13} /> 恢復排程</> : <><Ico name="pause" size={13} /> 暫停出題</>}</button>
+              <button onClick={onReset} className="btn-ghost px-4 py-2 text-sm"><Ico name="reset" size={13} /> 進度歸零</button>
+              <button onClick={onDelete} className="fb text-xs underline" style={{ color: "#888", marginLeft: "auto" }}>刪除</button>
+            </div>
+          </>
+        )}
       </div>
     </div>
   );
@@ -2902,10 +3159,10 @@ function SettingsTab({ accent, setAccent, voiceURI, setVoiceURI, notify }) {
   }
 
   // English TTS voices load asynchronously (getVoices() often starts empty until voiceschanged).
-  const [voices, setVoices] = useState(canSpeak ? enVoices() : []);
+  const [voices, setVoices] = useState(canSpeak ? rankedVoices() : []);
   useEffect(() => {
     if (!canSpeak) return;
-    const refresh = () => setVoices(enVoices());
+    const refresh = () => setVoices(rankedVoices());
     refresh();
     window.speechSynthesis.addEventListener("voiceschanged", refresh);
     return () => window.speechSynthesis.removeEventListener("voiceschanged", refresh);
@@ -2972,17 +3229,21 @@ function SettingsTab({ accent, setAccent, voiceURI, setVoiceURI, notify }) {
         {canSpeak && (
           <Cell tag="語音 Voice">
             <div className="fb text-xs mb-2" style={{ color: "#666" }}>
-              測驗發音、單字卡朗讀用的英文語音。不同裝置可選的語音不同。
+              測驗發音、單字卡朗讀用的英文語音。✨ 標記的是這台裝置較自然的神經語音,清單已依自然度排序。
             </div>
             <select value={voiceURI || ""} onChange={(e) => setVoiceURI(e.target.value)}
               className="fb px-3 py-2 text-sm w-full" style={{ border: `1px solid ${INK}`, background: "transparent" }}>
-              <option value="">系統預設</option>
+              <option value="">自動(挑最自然語音){voices[0] ? ` — 目前:${voices[0].name}` : ""}</option>
               {voices.map((v) => (
-                <option key={v.voiceURI} value={v.voiceURI}>{v.name} ({v.lang})</option>
+                <option key={v.voiceURI} value={v.voiceURI}>{(isNaturalVoice(v) ? "✨ " : "") + v.name} ({v.lang})</option>
               ))}
             </select>
             <button onClick={() => speak("This is how the selected voice sounds.")}
               className="btn-ghost px-4 py-2.5 text-sm mt-2 w-full"><Ico name="speaker" size={13} /> 試聽</button>
+            <div className="fb text-xs mt-2" style={{ color: "#888", lineHeight: 1.6 }}>
+              想要更自然的發音:Windows 用 <b>Edge</b> 開啟,就能選到 Microsoft「Online (Natural)」神經語音;
+              iPhone 到 設定 → 輔助使用 → 朗讀內容 → 語音 → 英文,下載<b>「加強版」</b>語音,聽起來接近真人。
+            </div>
             {voices.length === 0 && (
               <div className="fb text-xs mt-2" style={{ color: "#999" }}>這台裝置暫時沒抓到英文語音,用系統預設即可</div>
             )}
